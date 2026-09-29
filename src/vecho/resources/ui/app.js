@@ -281,7 +281,7 @@ function renderMarkdown(md, id) {
       if (m) {
         const indent = (m[1] ?? m[4]).length;
         const marker = m[2] ?? m[5];
-        items.push({ indent, ordered: /\d/.test(marker), text: (m[3] ?? "").trim(), extra: [], children: [] });
+        items.push({ indent, ordered: /\d/.test(marker), start: parseInt(marker, 10), text: (m[3] ?? "").trim(), extra: [], children: [] });
         k++; continue;
       }
       if (indentOf(line) > 0 && items.length) { items[items.length - 1].extra.push(line.trim()); k++; continue; }
@@ -298,7 +298,8 @@ function renderMarkdown(md, id) {
     const html = (nodes) => {
       if (!nodes.length) return "";
       const tag = nodes[0].ordered ? "ol" : "ul";
-      return `<${tag}>` + nodes.map((n) => {
+      const start = nodes[0].ordered && nodes[0].start > 1 ? ` start="${nodes[0].start}"` : "";
+      return `<${tag}${start}>` + nodes.map((n) => {
         const task = n.text.match(/^\[([ xX])\]\s*(.*)$/);
         const extra = n.extra.map((e) => `<p>${mdInline(e)}</p>`).join("");
         if (task) {
@@ -325,7 +326,7 @@ function renderMarkdown(md, id) {
       out.push(`<pre><code>${esc(body.join("\n"))}</code></pre>`);
       continue;
     }
-    const heading = trimmed.match(/^(#{1,6})\s+(.*?)\s*#*$/);
+    const heading = trimmed.match(/^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/);
     if (heading) {
       const tag = Math.min(4, Math.max(2, heading[1].length));  // the page title is the only h1
       out.push({ heading: heading[1].length, html: `<h${tag}>${mdInline(heading[2])}</h${tag}>` });
@@ -401,8 +402,9 @@ function statusHtml(status) {
 }
 
 function renderList() {
-  const q = $("search").value.trim().toLowerCase();
-  const shown = sessions.filter((s) => !q || `${nameOf(s)} ${s.tldr}`.toLowerCase().includes(q));
+  const fold = (text) => text.normalize("NFC").toLowerCase();  // imported names may be NFD
+  const q = fold($("search").value.trim());
+  const shown = sessions.filter((s) => !q || fold(`${nameOf(s)} ${s.tldr}`).includes(q));
   if (!sessions.length) { $("list").innerHTML = `<p class="list-empty">${esc(T.empty)}</p>`; return; }
   if (!shown.length) { $("list").innerHTML = `<p class="list-empty">${esc(T.noMatch)}</p>`; return; }
   let html = "", group = "";
@@ -437,7 +439,13 @@ async function select(id, { keepScroll = false, auto = false } = {}) {
   if (!id) { detail = null; render(); return; }
   let fresh = null;
   try { fresh = await api("sessions/" + encodeURIComponent(id)); }
-  catch { if (id === selected) { selected = null; saved.set("selected", null); } }
+  catch {
+    if (id === selected && !page) {  // gone (e.g. deleted elsewhere): don't keep showing another
+      selected = null; saved.set("selected", null); detail = null;
+      renderList(); render({ newSession: true });
+    }
+    return;
+  }
   if (id !== selected || page) return;  // the user moved on while this was loading
   detail = fresh;
   render({ keepScroll, newSession: true });
@@ -735,7 +743,7 @@ function sectionsOf(body) {
   let code = false;
   for (const line of body.split("\n")) {
     if (line.trim().startsWith("```")) { code = !code; continue; }
-    const m = !code && line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+    const m = !code && line.match(/^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/);
     if (m) found.push([m[1].length, m[2]]);
   }
   return found;
