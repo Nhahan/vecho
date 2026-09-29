@@ -35,20 +35,29 @@ ollama pull qwen3.8:27b                # 기본 요약 모델 (약 17GB, 메모�
 brew install --cask blackhole-2ch      # 관리자 비밀번호 필요
 sudo killall coreaudiod                # 드라이버 로드 (재부팅해도 됨)
 
-uv run vecho setup                     # Multi-Output 장치 생성 (1회)
 uv run vecho doctor                    # 환경 점검
 ```
 
 ### 상대방 소리 캡처는 자동입니다
 
-`vecho setup`이 내 스피커(또는 헤드폰)와 BlackHole로 **동시에** 소리를 보내는 `vecho Multi-Output`
-장치를 만듭니다. 이후 `vecho record`는 녹음하는 동안에만 소리 출력을 이 장치로 바꾸고, 종료(Ctrl+C,
-오류 포함)하면 **원래 출력으로 되돌립니다.** (Multi-Output 장치는 볼륨 키가 동작하지 않아, 평소에는
-선택해 두지 않는 편이 좋습니다.) 비정상 종료로 복구되지 못한 경우에도 다음 실행 때 원래 출력을 복구합니다.
+Discord · Zoom · Meet · FaceTime · 카카오톡 등 **시스템 소리 출력으로 나오는 음성은 앱과 상관없이**
+전부 상대방 트랙으로 녹음됩니다. 설정할 것은 없습니다.
 
-- 출력 장치를 바꿨다면(예: AirPods) `vecho setup --output "AirPods" --force`로 다시 만드세요.
-- 자동 전환이 싫다면 `vecho record --no-routing`.
-- 장치를 지우려면 `vecho setup --remove`.
+`vecho record`를 시작하면 지금 듣고 있는 출력 장치(내장 스피커, AirPods, USB 헤드셋, 모니터 등)를
+자동으로 감지해서, 그 장치와 BlackHole로 **동시에** 소리를 보내는 `vecho Multi-Output`을 그 장치
+기준으로 만들고 출력으로 선택합니다. 종료(Ctrl+C, 오류 포함)하면 **원래 출력으로 되돌립니다.**
+(Multi-Output 장치는 볼륨 키가 동작하지 않아 평소에는 선택해 두지 않습니다.)
+
+- 녹음 중 출력 장치가 바뀌면(예: 통화 중 AirPods 연결) 2초 안에 감지해서 새 장치에 맞춰 다시 구성합니다.
+  이 전환 순간(수 초)에는 상대방 소리가 잠깐 끊길 수 있습니다.
+- 비정상 종료로 복구되지 못한 경우에도 다음 실행 때 원래 출력을 복구합니다.
+- 출력이 BlackHole 같은 가상 장치이거나 BlackHole과 결합할 수 없는 장치면, 소리는 그대로 들리고
+  경고만 표시됩니다(그 트랙은 무음으로 기록되고 종료 시 알려줍니다).
+- 자동 전환이 싫다면 `vecho record --no-routing`. `vecho setup`으로 미리 만들거나 `--remove`로 지울 수도 있습니다.
+
+> **앱의 자체 출력 설정에 주의하세요.** Discord 등에서 출력 장치를 특정 장치로 **고정**해 두면 시스템 출력을
+> 우회하므로 녹음되지 않습니다. 앱의 오디오 설정에서 출력 장치를 **기본값(Default)** 으로 두세요.
+> 내 목소리는 시스템 기본 마이크로 녹음됩니다.
 
 > 헤드폰을 쓰면 가장 깨끗합니다. 스피커로 들으면 상대방 소리가 마이크에 다시 들어가지만,
 > 깨끗한 루프백 트랙과 비교해 **마이크 쪽 에코는 전사 단계에서 자동으로 제거**됩니다
@@ -76,7 +85,7 @@ uv run vecho record --title "주간 회의" --language ko
 
 | 명령 | 설명 |
 | --- | --- |
-| `vecho setup` | Multi-Output 장치 생성 (1회, `--force` 재생성, `--remove` 삭제) |
+| `vecho setup` | (선택) Multi-Output 장치 미리 만들기 (`--force` 재생성, `--remove` 삭제) |
 | `vecho record` | 마이크 + 시스템 오디오 녹음 후 전사·요약 (`--no-process`로 녹음만) |
 | `vecho import --me a.wav --remote b.wav` | 이미 있는 오디오 파일로 세션 생성 (`--mixed`는 한 파일에 양쪽이 섞인 경우) |
 | `vecho transcribe [세션]` | 전사만 다시 실행 |
@@ -84,7 +93,7 @@ uv run vecho record --title "주간 회의" --language ko
 | `vecho list` | 세션 목록 |
 | `vecho show [세션]` | 요약 출력 (`--transcript` 전사문, `--path` 폴더 경로) |
 | `vecho devices` | 오디오 입력 장치 목록 (`loopback` 표시) |
-| `vecho doctor` | 마이크 · BlackHole · Multi-Output · Whisper · Ollama 점검 |
+| `vecho doctor` | 마이크 · BlackHole · 현재 출력 · Whisper · Ollama 점검 |
 
 `[세션]`에는 전체 ID, 앞부분(prefix), 일부 문자열 또는 `latest`(기본값)를 쓸 수 있습니다.
 
