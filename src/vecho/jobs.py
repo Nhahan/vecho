@@ -19,7 +19,7 @@ from .config import Config
 from .errors import VechoError
 from .session import TRANSCRIPT_JSON, Session
 from .summarize import summarize_session
-from .transcribe import Transcriber, transcribe_session
+from .transcribe import MlxTranscriber, Transcriber, make_transcriber, transcribe_session
 
 QUEUED = "queued"
 TRANSCRIBING = "transcribing"
@@ -69,7 +69,7 @@ class Processor:
         self._transcribe = transcribe
         self._summarize = summarize
         self._on_finish = on_finish
-        self._transcriber: Transcriber | None = None
+        self._transcriber: Transcriber | MlxTranscriber | None = None
         self._states: dict[str, JobState] = {}
         self._lock = threading.Lock()
         self._queue: queue.Queue[tuple[Session, JobState] | None] = queue.Queue()
@@ -159,9 +159,7 @@ class Processor:
                 self._transcriber is None
                 or self._transcriber.model_name != self.config.whisper_model
             ):
-                self._transcriber = Transcriber(
-                    self.config.whisper_model, self.config.whisper_compute_type
-                )
+                self._transcriber = make_transcriber(self.config)
             self._transcribe(
                 session,
                 self.config,

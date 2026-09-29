@@ -21,6 +21,7 @@ class Config:
     # Speech-to-text (faster-whisper). ``language`` None means auto-detect per track.
     whisper_model: str = "large-v3-turbo"
     whisper_compute_type: str = "int8"
+    whisper_backend: str = "auto"  # auto | mlx (Apple Silicon GPU) | faster-whisper
     language: str | None = None
     # Summarization (Ollama).
     llm_host: str = "http://127.0.0.1:11434"
@@ -40,6 +41,8 @@ class Config:
                 raise ConfigError(f"'{name}' must be a positive integer")
         if self.llm_timeout <= 0:
             raise ConfigError("'llm_timeout' must be positive")
+        if self.whisper_backend not in {"auto", "mlx", "faster-whisper"}:
+            raise ConfigError("'whisper_backend' must be auto, mlx or faster-whisper")
 
     @property
     def sessions_dir(self) -> Path:

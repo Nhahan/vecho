@@ -28,6 +28,7 @@ from .config import Config
 from .errors import SessionError, VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_JSON, Session, SessionStore
 from .summarize import OllamaClient
+from .transcribe import engine_label
 
 MAX_UPLOAD_BYTES = 2 * 1024**3
 MIX_FILE = "mix.wav"
@@ -312,7 +313,7 @@ class App:
         add(
             "whisper",
             whisper,
-            self.config.whisper_model if whisper else "not installed",
+            engine_label(self.config) if whisper else "not installed",
             "" if whisper else "pip install faster-whisper",
         )
 

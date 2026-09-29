@@ -190,3 +190,149 @@ def test_word_timestamps_are_requested(tmp_path, config):
     model = FakeModel({"me.wav": [(0, 1, "hi")]})
     transcribe_session(session, config, transcriber_for(model))
     assert model.calls[0][1]["word_timestamps"] is True
+
+
+# ---- MLX engine --------------------------------------------------------------------------
+
+
+def write_speech_wav(path, rate=16000):
+    """1 s of silence, 1.5 s of a voice-like tone, 1 s of silence — enough for the VAD."""
+    import wave
+
+    import numpy as np
+
+    t = np.arange(int(rate * 1.5)) / rate
+    voice = 0.4 * np.sin(2 * np.pi * 180 * t) * (1 + 0.5 * np.sin(2 * np.pi * 4 * t))
+    for harmonic in (2, 3, 4):
+        voice += 0.15 / harmonic * np.sin(2 * np.pi * 180 * harmonic * t)
+    pcm = np.concatenate([np.zeros(rate), voice, np.zeros(rate)])
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        wav.writeframes((np.clip(pcm, -1, 1) * 32767).astype("<i2").tobytes())
+
+
+def test_mlx_repo_names():
+    from vecho.transcribe import mlx_repo
+
+    assert mlx_repo("large-v3-turbo") == "mlx-community/whisper-large-v3-turbo"
+    assert mlx_repo("small") == "mlx-community/whisper-small-mlx"
+    assert mlx_repo("someone/custom-whisper") == "someone/custom-whisper"
+
+
+def test_mlx_skips_silent_tracks_without_calling_the_model(tmp_path):
+    import wave
+
+    from vecho.transcribe import MlxTranscriber
+
+    path = tmp_path / "silent.wav"
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\0\0" * 16000 * 5)
+
+    def never(*args, **kwargs):
+        raise AssertionError("the model must not run on silence")
+
+    result = MlxTranscriber("large-v3-turbo", transcribe_fn=never).transcribe(path, "me")
+    assert result.segments == [] and result.duration == pytest.approx(5.0)
+
+
+def test_mlx_maps_times_back_and_splits_at_pauses(tmp_path, monkeypatch):
+    from vecho import transcribe as tr
+
+    path = tmp_path / "me.wav"
+    write_speech_wav(path)
+
+    from vecho.transcribe import SpeechTimeline
+
+    # one speech chunk that really began at 10 s
+    timeline = SpeechTimeline([{"start": 160000, "end": 240000}], 16000)
+    monkeypatch.setattr(tr, "speech_only", lambda audio: (audio[:100], timeline))
+    seen = {}
+
+    def fake_mlx(audio, **kwargs):
+        seen.update(kwargs)
+        return {
+            "language": "ko",
+            "segments": [
+                {
+                    "start": 0.0,
+                    "end": 5.0,
+                    "text": " 안녕하세요 반갑습니다",
+                    "words": [
+                        {"start": 0.0, "end": 0.5, "word": " 안녕하세요"},
+                        {"start": 3.0, "end": 3.5, "word": " 반갑습니다"},
+                    ],
+                }
+            ],
+        }
+
+    progress = []
+    result = tr.MlxTranscriber("large-v3-turbo", transcribe_fn=fake_mlx).transcribe(
+        path, "me", "ko", on_progress=lambda *a: progress.append(a)
+    )
+    assert [(s.start, s.end, s.text) for s in result.segments] == [
+        (10.0, 10.5, "안녕하세요"),
+        (13.0, 13.5, "반갑습니다"),
+    ]
+    assert result.language == "ko"
+    assert seen["path_or_hf_repo"] == "mlx-community/whisper-large-v3-turbo"
+    assert seen["word_timestamps"] is True and seen["condition_on_previous_text"] is False
+    assert progress[0][1] == 0.0 and progress[-1][1] == progress[-1][2]
+
+
+def test_mlx_errors_are_wrapped(tmp_path, monkeypatch):
+    from vecho import transcribe as tr
+
+    path = tmp_path / "me.wav"
+    write_speech_wav(path)
+    monkeypatch.setattr(tr, "speech_only", lambda audio: (audio, None))
+
+    def broken(audio, **kwargs):
+        raise RuntimeError("metal device lost")
+
+    with pytest.raises(TranscriptionError, match="metal device lost"):
+        tr.MlxTranscriber("large-v3-turbo", transcribe_fn=broken).transcribe(path, "me")
+
+
+@pytest.mark.parametrize(
+    ("backend", "available", "expected"),
+    [
+        ("auto", True, "MlxTranscriber"),
+        ("auto", False, "Transcriber"),
+        ("faster-whisper", True, "Transcriber"),
+        ("mlx", False, "MlxTranscriber"),
+    ],
+)
+def test_backend_selection(monkeypatch, config, backend, available, expected):
+    from vecho import transcribe as tr
+
+    monkeypatch.setattr(tr, "mlx_available", lambda: available)
+    engine = tr.make_transcriber(config.with_overrides(whisper_backend=backend))
+    assert type(engine).__name__ == expected
+
+
+def test_words_at_a_chunk_boundary_stay_in_their_own_chunk():
+    """Two sentences 30 s apart become adjacent in the speech-only audio; keep them apart."""
+    from vecho.transcribe import SpeechTimeline
+
+    rate = 16000
+    chunks = [{"start": 0, "end": 2 * rate}, {"start": 32 * rate, "end": 34 * rate}]
+    timeline = SpeechTimeline(chunks, rate, gap=0.6)  # 2nd chunk starts at 2.6 s when joined
+    assert timeline.to_original(1.0, 1.5) == (1.0, 1.5)
+    assert timeline.to_original(2.6, 3.2) == (32.0, 32.6)
+    # a word Whisper places slightly early, straddling the gap, still belongs to chunk 2
+    assert timeline.to_original(2.4, 3.2) == (32.0, 32.6)
+    # a span inside the gap goes to the nearest chunk
+    assert timeline.to_original(2.05, 2.15) == (2.0, 2.0)
+
+
+def test_speech_only_skips_pure_silence():
+    import numpy as np
+
+    from vecho import transcribe as tr
+
+    assert tr.speech_only(np.zeros(16000 * 40, dtype=np.float32)) is None

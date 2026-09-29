@@ -18,7 +18,7 @@ from .config import Config, load_config
 from .errors import SessionError, VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_MD, Session, SessionStore
 from .summarize import OllamaClient, summarize_session
-from .transcribe import transcribe_session
+from .transcribe import engine_label, transcribe_session
 from .transcript import format_duration
 
 
@@ -299,7 +299,7 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
         _doctor_remote(report, config)
 
     if importlib.util.find_spec("faster_whisper"):
-        report("OK", f"faster-whisper installed (model: {config.whisper_model})")
+        report("OK", f"speech recognition: {engine_label(config)}")
     else:
         report("FAIL", "faster-whisper is not installed")
 
