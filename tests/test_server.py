@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import threading
 import time
@@ -19,7 +20,7 @@ from vecho import audio, jobs, systemaudio
 from vecho.audio import InputDevice
 from vecho.errors import SummarizationError
 from vecho.server import App, VechoHTTPServer, summary_body, tldr_of
-from vecho.session import SessionStore
+from vecho.session import Session, SessionStore
 from vecho.systemaudio import SystemAudioSource
 from vecho.transcript import Segment, save_segments
 
@@ -833,3 +834,70 @@ def test_creating_a_template_never_overwrites_an_existing_one(served):
         )[0]
         == 200
     )
+
+
+# ---- faults ---------------------------------------------------------------------------------
+
+
+def test_a_failed_save_at_start_stops_the_microphone(served, monkeypatch):
+    app, client = served
+    stopped = []
+    real_stop = audio.Recorder.stop
+    monkeypatch.setattr(audio.Recorder, "stop", lambda self: stopped.append(1) or real_stop(self))
+
+    real_save = Session.save
+
+    def full(self):
+        if self.meta.tracks:  # the save right after the microphone started
+            raise OSError(28, "No space left on device")
+        real_save(self)
+
+    monkeypatch.setattr(Session, "save", full)
+    status, body, _ = client.call("POST", "/api/record/start", {"mic_only": True})
+    assert status == 500 and body["code"] == "disk_full"
+    assert stopped and app.store.list() == []
+    assert client.call("GET", "/api/state")[1]["recording"] is None
+
+
+def test_damaged_files_never_hide_a_session(served):
+    app, client = served
+    good = make_session(app, "좋은 회의")
+    bad = make_session(app, "망가진 회의")
+    bad.path_for("summary.md").write_bytes(b"# t\n\n## \xff\xfe\n")
+    bad.path_for("transcript.json").write_text('{"segments": [{"start": 0}]}', "utf-8")
+    status, listed, _ = client.call("GET", "/api/sessions")
+    assert status == 200 and {s["id"] for s in listed} == {good.id, bad.id}
+    status, detail, _ = client.call("GET", f"/api/sessions/{bad.id}")
+    assert status == 200 and detail["segments"] == []
+    assert {"code": "bad_transcript", "role": "", "hint": ""} in detail["issues"]
+
+
+def test_a_copied_session_folder_is_its_own_session(served):
+    app, client = served
+    original = make_session(app, "원본")
+    shutil.copytree(original.dir, app.store.root / "사본")
+    _, listed, _ = client.call("GET", "/api/sessions")
+    assert sorted(s["id"] for s in listed) == sorted([original.id, "사본"])
+    assert client.call("GET", "/api/sessions/사본")[0] == 200
+
+
+@pytest.mark.parametrize(
+    "method, path, body",
+    [
+        ("POST", "/api/record/start", {"template": {"name": "x"}}),
+        ("POST", "/api/record/start", {"title": ["a"]}),
+        ("PUT", "/api/templates/a", {"body": "## A", "previous": 5}),
+    ],
+)
+def test_values_of_the_wrong_type_are_refused(served, method, path, body):
+    status, answer, _ = served[1].call(method, path, body)
+    assert status == 400 and answer["error"] == "expected text"
+
+
+def test_malformed_requests_get_a_clear_answer(served):
+    _, client = served
+    assert client.call("GET", "/api/sessions/" + "a" * 5000)[0] == 404
+    status, answer, _ = client.call("PATCH", "/api/sessions/x", raw=b"[" * 100000)
+    assert status == 400 and answer["error"] == "invalid JSON"
+    status, answer, _ = client.call("PUT", "/api/templates/a", raw=b" " * (3 << 20))
+    assert status == 400 and answer["code"] == "request_too_large"  # not a connection reset

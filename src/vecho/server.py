@@ -7,6 +7,7 @@ Host header, so other web pages open in the same browser cannot drive it.
 from __future__ import annotations
 
 import contextlib
+import errno
 import importlib.util
 import json
 import mimetypes
@@ -108,9 +109,8 @@ class App:
             # Outside the lock: the first start may build the capture helper, which takes a
             # while, and nothing else (status polls, quitting) should wait for that.
             live = recording.LiveRecording(self.config, title=title.strip(), mic_only=mic_only)
+            live.session.meta.template = template  # saved by start()
             live.start()
-            live.session.meta.template = template
-            live.session.save()
             with self._lock:
                 self._live = live
                 self._issues[live.session.id] = []
@@ -183,7 +183,11 @@ class App:
     # -- sessions ---------------------------------------------------------------------------
 
     def _session(self, session_id: str) -> Session:
-        if not _SESSION_ID.match(session_id) or session_id in {".", ".."}:
+        if (
+            not _SESSION_ID.match(session_id)
+            or session_id in {".", ".."}
+            or len(session_id.encode("utf-8")) > 255  # longer than any file name can be
+        ):
             raise NotFound("no such session", "session_missing")
         directory = self.store.root / session_id
         if not (directory / "session.json").is_file():
@@ -205,6 +209,13 @@ class App:
             return "transcribed" if jobs.has_speech(session) else "empty"
         return "recorded"
 
+    def _session_text(self, path: Path) -> str:
+        """A generated text file, even one damaged or saved in another encoding."""
+        try:
+            return path.read_text("utf-8", errors="replace") if path.is_file() else ""
+        except OSError:
+            return ""
+
     def list_sessions(self) -> list[dict[str, Any]]:
         items = []
         for session in self.store.list():
@@ -216,7 +227,7 @@ class App:
                     "created_at": session.meta.created_at,
                     "duration": session.meta.duration_sec,
                     "status": self._status(session),
-                    "tldr": tldr_of(summary.read_text("utf-8")) if summary.is_file() else "",
+                    "tldr": tldr_of(self._session_text(summary)),
                 }
             )
         return items
@@ -225,10 +236,18 @@ class App:
         session = self._session(session_id)
         summary_path = session.path_for(SUMMARY_MD)
         segments = []
-        if session.has_transcript:
-            for segment in transcript.coalesce(
+        issues = list(session.meta.issues)
+        try:
+            loaded = (
                 transcript.load_segments(session.path_for(TRANSCRIPT_JSON))
-            ):
+                if session.has_transcript
+                else []
+            )
+        except VechoError:  # still open the session, so it can be transcribed again or deleted
+            loaded = []
+            issues.append({"code": "bad_transcript", "role": "", "hint": ""})
+        if loaded:
+            for segment in transcript.coalesce(loaded):
                 segments.append(
                     {
                         "role": segment.role,
@@ -258,12 +277,10 @@ class App:
                 and (meta.summary_template or meta.template) != templates.BUILTIN_NAME
             ),
             "tracks": list(meta.tracks),
-            "summary": summary_body(summary_path.read_text("utf-8"))
-            if summary_path.is_file()
-            else "",
+            "summary": summary_body(self._session_text(summary_path)),
             "segments": segments,
             "job": job.to_dict() if job else None,
-            "issues": meta.issues,
+            "issues": issues,
             "labels": {role: self.config.label_for(role) for role in roles.ALL},
         }
 
@@ -591,9 +608,28 @@ def load_ui(token: str) -> bytes:
     return _ui_file("index.html").replace(b"__VECHO_TOKEN__", token.encode("ascii"))
 
 
+_DRAIN_MAX = 64 * 1024 * 1024  # beyond this, a refused upload is simply cut off
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if not isinstance(value, str):
+        raise VechoError("expected text")
+    return value
+
+
+def _header_text(raw: str) -> str:
+    """A header value the UI percent-encodes; other clients may send raw UTF-8 instead."""
+    with contextlib.suppress(UnicodeError):  # http.server decodes headers as Latin-1
+        raw = raw.encode("latin-1").decode("utf-8")
+    return urllib.parse.unquote(raw)
+
+
 class Handler(BaseHTTPRequestHandler):
     server: VechoHTTPServer
     protocol_version = "HTTP/1.1"
+    timeout = 60  # a client that stalls mid-request must not hold a session "processing"
 
     def log_message(self, format: str, *args: Any) -> None:
         pass
@@ -607,6 +643,8 @@ class Handler(BaseHTTPRequestHandler):
     def _send(
         self, status: int, body: bytes, content_type: str, headers: dict[str, str] | None = None
     ) -> None:
+        if not getattr(self, "_consumed", True):
+            self._drain()
         self.send_response(status)
         if not getattr(self, "_consumed", True):
             # the request body was never read; it would be parsed as the next request
@@ -624,6 +662,25 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _drain(self) -> None:
+        """Read what is left of an unread request body before answering.
+
+        A client still sending gets a connection reset instead of the answer when the server
+        closes a socket with unread data, so a refused upload would look like a network error.
+        """
+        left = min(self._length_or_zero(), _DRAIN_MAX)
+        with contextlib.suppress(OSError):
+            self.connection.settimeout(2)
+            while left > 0:
+                chunk = self.rfile.read1(min(left, 1 << 16))
+                if not chunk:
+                    break
+                left -= len(chunk)
+
+    def _length_or_zero(self) -> int:
+        raw = (self.headers.get("Content-Length") or "0").strip()
+        return int(raw) if raw.isdigit() else 0
+
     def _json(self, status: int, payload: Any) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._send(status, body, "application/json; charset=utf-8")
@@ -640,12 +697,12 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self) -> dict[str, Any]:
         length = self._length()
         if length > 1024 * 1024:
-            raise VechoError("request too large")
+            raise VechoError("request too large", "request_too_large")
         raw = self.rfile.read(length) if length else b"{}"
         self._consumed = True
         try:
             data = json.loads(raw or b"{}")
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise VechoError("invalid JSON") from exc
         if not isinstance(data, dict):
             raise VechoError("invalid JSON")
@@ -709,8 +766,15 @@ class Handler(BaseHTTPRequestHandler):
             raise  # the client went away; nothing to answer
         except Exception as exc:  # never drop a request without an answer
             self.log_error("unexpected error: %r", exc)
+            full = isinstance(exc, OSError) and exc.errno == errno.ENOSPC
+            if not full and isinstance(exc.__cause__, OSError):
+                full = exc.__cause__.errno == errno.ENOSPC
             with contextlib.suppress(Exception):
-                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"unexpected error: {exc}")
+                self._error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    f"unexpected error: {exc}",
+                    "disk_full" if full else None,
+                )
 
     def _route(self, method: str, parts: list[str], query: dict[str, list[str]]) -> None:
         app = self.app
@@ -722,9 +786,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(
                     200,
                     app.start_recording(
-                        str(body.get("title", "")),
+                        _optional_text(body.get("title")) or "",
                         bool(body.get("mic_only", False)),
-                        body.get("template") or None,
+                        _optional_text(body.get("template")),
                     ),
                 )
             case "POST", ["record", "stop"]:
@@ -734,7 +798,7 @@ class Handler(BaseHTTPRequestHandler):
             case "GET", ["sessions", sid]:
                 self._json(200, app.session_detail(sid))
             case "PATCH", ["sessions", sid]:
-                self._json(200, app.rename(sid, str(self._body().get("title", ""))))
+                self._json(200, app.rename(sid, _optional_text(self._body().get("title")) or ""))
             case "DELETE", ["sessions", sid]:
                 app.delete(sid)
                 self._json(200, {"deleted": sid})
@@ -742,14 +806,16 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._body()
                 self._json(
                     200,
-                    app.process(sid, str(body.get("step", "all")), body.get("template") or None),
+                    app.process(
+                        sid, str(body.get("step", "all")), _optional_text(body.get("template"))
+                    ),
                 )
             case (("GET" | "HEAD"), ["sessions", sid, "audio"]):
                 self._file(app.playback_file(sid))
             case "POST", ["import"]:
-                name = urllib.parse.unquote(self.headers.get("X-Filename", ""))
+                name = _header_text(self.headers.get("X-Filename", ""))
                 length = self._length()
-                template = urllib.parse.unquote(self.headers.get("X-Template", "")) or None
+                template = _header_text(self.headers.get("X-Template", "")) or None
                 result = app.import_audio(name, self.rfile, length, template)
                 self._consumed = True
                 self._json(200, result)
@@ -757,7 +823,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(200, app.list_templates())
             case "PUT", ["templates", name]:
                 body = self._body()
-                previous = body.get("previous") or None
+                previous = _optional_text(body.get("previous"))
                 self._json(200, app.save_template(name, str(body.get("body", "")), previous))
             case "DELETE", ["templates", name]:
                 self._json(200, app.delete_template(name))
