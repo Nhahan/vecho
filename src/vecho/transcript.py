@@ -1,0 +1,123 @@
+"""Transcript data model, merging of per-track segments, rendering and chunking."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from .errors import SessionError
+
+LabelFor = Callable[[str], str]
+
+# Same-speaker segments closer together than this read as one utterance.
+COALESCE_GAP_SEC = 1.5
+
+
+@dataclass(frozen=True)
+class Segment:
+    start: float
+    end: float
+    role: str
+    text: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Segment:
+        return cls(
+            start=float(data["start"]),
+            end=float(data["end"]),
+            role=str(data["role"]),
+            text=str(data["text"]),
+        )
+
+
+def merge_segments(*groups: Iterable[Segment]) -> list[Segment]:
+    """Interleave segments from several tracks into one timeline."""
+    merged = [segment for group in groups for segment in group]
+    merged.sort(key=lambda s: (s.start, s.end, s.role))
+    return merged
+
+
+def coalesce(segments: Sequence[Segment], max_gap: float = COALESCE_GAP_SEC) -> list[Segment]:
+    """Join consecutive same-speaker segments that follow each other closely."""
+    result: list[Segment] = []
+    for segment in segments:
+        previous = result[-1] if result else None
+        if previous and previous.role == segment.role and segment.start - previous.end <= max_gap:
+            result[-1] = Segment(
+                previous.start,
+                max(previous.end, segment.end),
+                previous.role,
+                f"{previous.text} {segment.text}",
+            )
+        else:
+            result.append(segment)
+    return result
+
+
+def format_timestamp(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def format_duration(seconds: float | None) -> str:
+    return "unknown" if seconds is None else format_timestamp(seconds)
+
+
+def render_lines(segments: Sequence[Segment], label_for: LabelFor) -> list[str]:
+    """One ``[HH:MM:SS] Speaker: text`` line per utterance; used for the LLM and for humans."""
+    lines = []
+    for segment in coalesce(segments):
+        label = label_for(segment.role)
+        speaker = f"{label}: " if label else ""
+        lines.append(f"[{format_timestamp(segment.start)}] {speaker}{segment.text}")
+    return lines
+
+
+def render_markdown(title: str, segments: Sequence[Segment], label_for: LabelFor) -> str:
+    body = "\n\n".join(render_lines(segments, label_for)) or "_No speech detected._"
+    return f"# {title} — Transcript\n\n{body}\n"
+
+
+def split_into_chunks(lines: Sequence[str], max_chars: int) -> list[str]:
+    """Group lines into chunks of at most ``max_chars`` so each fits the LLM context.
+
+    Lines are never split across chunks unless a single line alone is too long.
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for line in lines:
+        pieces = [line[i : i + max_chars] for i in range(0, len(line), max_chars)] or [""]
+        for piece in pieces:
+            if current and size + len(piece) + 1 > max_chars:
+                chunks.append("\n".join(current))
+                current, size = [], 0
+            current.append(piece)
+            size += len(piece) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks
+
+
+def save_segments(
+    path: Path, segments: Sequence[Segment], language: str | None, model: str
+) -> None:
+    payload = {
+        "language": language,
+        "model": model,
+        "segments": [asdict(segment) for segment in segments],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_segments(path: Path) -> list[Segment]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return [Segment.from_dict(item) for item in data["segments"]]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SessionError(f"cannot read transcript {path}: {exc}") from exc
