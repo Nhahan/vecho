@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import re
 import tempfile
 import threading
 import unicodedata
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -51,8 +52,48 @@ class SessionMeta:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionMeta:
-        known = {f.name for f in fields(cls)}
-        return cls(**{k: v for k, v in data.items() if k in known})
+        """Known fields of the right type; a damaged optional field falls back to its default."""
+        kept = {}
+        for name, kind in _FIELD_TYPES.items():
+            value = data.get(name)
+            if isinstance(value, kind) and not isinstance(value, bool):
+                kept[name] = value
+            elif name in _REQUIRED:
+                raise TypeError(f"'{name}' is missing or not text")
+        if "duration_sec" in kept and not math.isfinite(kept["duration_sec"]):
+            del kept["duration_sec"]
+        if "tracks" in kept:
+            kept["tracks"] = {
+                k: v for k, v in kept["tracks"].items() if isinstance(v, str) and v.strip()
+            }
+        if "offsets" in kept:
+            kept["offsets"] = {
+                k: float(v)
+                for k, v in kept["offsets"].items()
+                if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+            }
+        if "issues" in kept:
+            kept["issues"] = [i for i in kept["issues"] if isinstance(i, dict)]
+        return cls(**{"id": "", "title": "", **kept})
+
+
+_FIELD_TYPES: dict[str, type | tuple[type, ...]] = {
+    "id": str,
+    "title": str,
+    "created_at": str,
+    "duration_sec": (int, float),
+    "tracks": dict,
+    "language": str,
+    "whisper_model": str,
+    "llm_model": str,
+    "transcribed_at": str,
+    "summarized_at": str,
+    "issues": list,
+    "template": str,
+    "offsets": dict,
+    "summary_template": str,
+}
+_REQUIRED = {"created_at"}  # the id comes from the folder, and a title may be empty
 
 
 class Session:
@@ -119,6 +160,7 @@ class Session:
             if not isinstance(data, dict):
                 raise ValueError("not a JSON object")
             meta = SessionMeta.from_dict(data)
+            meta.id = directory.name  # a renamed or copied folder is its own session
         except (OSError, ValueError, TypeError) as exc:  # includes bad UTF-8 and missing fields
             raise SessionError(f"cannot read session metadata {path}: {exc}") from exc
         return cls(directory, meta)

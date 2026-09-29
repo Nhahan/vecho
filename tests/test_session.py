@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 import pytest
@@ -178,3 +179,16 @@ def test_decomposed_hangul_is_found_by_what_people_type(tmp_path):
     created = store.create(unicodedata.normalize("NFD", "주간회의"), now=MOMENT)
     assert created.meta.title == "주간회의"  # stored composed
     assert store.resolve("주간회의").id == created.id
+
+
+def test_damaged_metadata_fields_fall_back_to_defaults(tmp_path):
+    store = SessionStore(tmp_path)
+    session = store.create("회의")
+    path = session.path_for("session.json")
+    data = json.loads(path.read_text("utf-8"))
+    data.update(title=5, tracks=None, offsets={"me": "x", "remote": 0.5}, duration_sec="abc")
+    path.write_text(json.dumps(data), "utf-8")
+    meta = Session.load(session.dir).meta
+    assert (meta.title, meta.tracks, meta.duration_sec) == ("", {}, None)
+    assert meta.offsets == {"remote": 0.5}
+    assert meta.id == session.dir.name
