@@ -35,6 +35,10 @@ class Stream:
     def start(self):
         pass
 
+    def abort(self):
+
+        self.stop()
+
     def stop(self):
         pass
 
@@ -93,7 +97,7 @@ class Client:
 
     def call(self, method, path, body=None, token=True, headers=None, raw=None):
         data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
-        path = urllib.parse.quote(path, safe="/?=&")  # like encodeURIComponent in the UI
+        path = urllib.parse.quote(path, safe="/?=&%")  # like encodeURIComponent in the UI
         request = urllib.request.Request(self.base + path, data=data, method=method)
         if token:
             request.add_header("X-Vecho-Token", self.token)
@@ -720,3 +724,88 @@ def test_a_failed_other_side_keeps_the_microphone_recording(served, mic, monkeyp
     assert any(i["code"] == "stopped" and i["role"] == "remote" for i in result["issues"])
     session = app.store.resolve(result["session_id"])
     assert session.meta.duration_sec >= 1.0
+
+
+# ---- second review --------------------------------------------------------------------------
+
+
+def test_a_title_typed_while_recording_stays_in_the_recorder(served, mic):
+    app, client = served
+    _, state, _ = client.call("POST", "/api/record/start", {"mic_only": True})
+    sid = state["recording"]["session_id"]
+    client.call("PATCH", f"/api/sessions/{sid}", {"title": "Typed"})
+    assert client.call("GET", "/api/state")[1]["recording"]["title"] == "Typed"
+    mic()
+    client.call("POST", "/api/record/stop")
+    assert app.store.resolve(sid).meta.title == "Typed"
+
+
+def test_a_failed_resummarize_keeps_the_renderer_of_the_summary_on_disk(served):
+    app, client = served
+    client.call("PUT", "/api/templates/멘토링", {"body": TEMPLATE})
+    session = make_session(app, "boom", summary=False)  # its summarize will fail
+    fake_transcribe(session, app.config)
+    session.path_for("summary.md").write_text(SUMMARY, encoding="utf-8")  # built-in summary
+    session.meta.summary_template = "기본 요약"
+    session.save()
+    client.call(
+        "POST", f"/api/sessions/{session.id}/process", {"step": "summarize", "template": "멘토링"}
+    )
+    assert wait_until(
+        lambda: client.call("GET", f"/api/sessions/{session.id}")[1]["status"] == "error"
+    )
+    _, detail, _ = client.call("GET", f"/api/sessions/{session.id}")
+    assert detail["template"] == "멘토링" and detail["template_summary"] is False
+
+
+def test_playback_mixes_24_bit_tracks(served):
+    app, client = served
+    session = app.store.create("24bit")
+    for role, value in (("me", 1000), ("remote", 2000)):
+        with wave.open(str(session.path_for(f"{role}.wav")), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(3)
+            w.setframerate(16000)
+            sample = int(value * 256).to_bytes(3, "little", signed=True)
+            w.writeframes(sample * 16000)
+        session.meta.tracks[role] = f"{role}.wav"
+    session.save()
+    status, _, _ = client.call("GET", f"/api/sessions/{session.id}/audio")
+    assert status == 200
+    with wave.open(str(session.path_for("mix.wav"))) as w:
+        assert w.getsampwidth() == 2
+        data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    assert abs(int(np.median(data)) - 3000) <= 2
+    assert not list(session.dir.glob(".decoded.*"))  # temporary decodes are cleaned up
+
+
+def test_template_names_with_a_slash_can_be_managed(served):
+    _, client = served
+    assert client.call("PUT", "/api/templates/a%2Fb", {"body": "## x\n"})[0] == 200
+    assert client.call("POST", "/api/templates/a%2Fb/default")[1]["default"] == "a/b"
+    assert client.call("DELETE", "/api/templates/a%2Fb")[0] == 200
+
+
+def test_quitting_waits_for_a_stop_that_is_finishing(served):
+    import threading as th
+
+    app, _ = served
+    app._stopping.add("finishing")
+
+    def finish():
+        time.sleep(0.4)
+        with app._settled:
+            app._stopping.discard("finishing")
+            app._settled.notify_all()
+
+    th.Thread(target=finish).start()
+    started = time.monotonic()
+    app.shutdown(wait=5)
+    assert 0.3 <= time.monotonic() - started < 3
+
+
+def test_unexpected_errors_still_get_an_answer(served, monkeypatch):
+    app, client = served
+    monkeypatch.setattr(app, "list_sessions", lambda: 1 / 0)
+    status, body, _ = client.call("GET", "/api/sessions")
+    assert status == 500 and "unexpected error" in body["error"]

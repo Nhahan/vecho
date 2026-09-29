@@ -17,6 +17,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import unicodedata
 import urllib.parse
 import wave
 from http import HTTPStatus
@@ -87,7 +88,10 @@ class App:
         self._lock = threading.Lock()
         self._live: recording.LiveRecording | None = None
         self._issues: dict[str, list[dict[str, str]]] = {}
-        self._stopping: set[str] = set()
+        self._stopping: set[str] = set()  # recordings being finalized
+        self._uploading: set[str] = set()
+        self._settled = threading.Condition(self._lock)
+        self._starting = False
         self._mix_lock = threading.Lock()
 
     # -- recording --------------------------------------------------------------------------
@@ -97,14 +101,22 @@ class App:
     ) -> dict[str, Any]:
         template = self._template_name(template)
         with self._lock:
-            if self._live is not None:
+            if self._live is not None or self._starting:
                 raise Conflict("a recording is already running")
+            self._starting = True
+        try:
+            # Outside the lock: the first start may build the capture helper, which takes a
+            # while, and nothing else (status polls, quitting) should wait for that.
             live = recording.LiveRecording(self.config, title=title.strip(), mic_only=mic_only)
             live.start()
             live.session.meta.template = template
             live.session.save()
-            self._live = live
-            self._issues[live.session.id] = []
+            with self._lock:
+                self._live = live
+                self._issues[live.session.id] = []
+        finally:
+            with self._lock:
+                self._starting = False
         return self.state()
 
     def stop_recording(self) -> dict[str, Any]:
@@ -114,6 +126,7 @@ class App:
                 self._stopping.add(live.session.id)  # not deletable while being finalized
         if live is None:
             raise Conflict("nothing is being recorded")
+        # (quitting waits for _stopping to empty; see shutdown())
         try:
             result = live.stop()
             session = result.session
@@ -127,19 +140,27 @@ class App:
             if processing:
                 self.processor.submit(session, "all")
         finally:
-            self._stopping.discard(live.session.id)
+            with self._settled:
+                self._stopping.discard(live.session.id)
+                self._settled.notify_all()
         return {
             "session_id": session.id,
             "issues": issues,
             "processing": processing,
         }
 
-    def shutdown(self) -> None:
-        """Keep whatever is being recorded when the app quits."""
+    def shutdown(self, wait: float = 20.0) -> None:
+        """Keep whatever is being recorded when the app quits.
+
+        A stop that is still finishing (it can take several seconds) is waited for, so its
+        session is saved and queued rather than cut off halfway.
+        """
         with self._lock:
             live, self._live = self._live, None
         if live is not None:
             live.abort()
+        with self._settled:
+            self._settled.wait_for(lambda: not self._stopping, timeout=wait)
         self.processor.shutdown()
 
     def state(self) -> dict[str, Any]:
@@ -174,7 +195,7 @@ class App:
         if (live is not None and live.session.id == session.id) or session.id in self._stopping:
             return "recording"
         job = self.processor.state(session.id)
-        if job is not None and job.active:
+        if (job is not None and job.active) or session.id in self._uploading:
             return "processing"
         if job is not None and job.stage == jobs.ERROR:
             return "error"
@@ -232,7 +253,9 @@ class App:
             # which renderer fits the summary on disk (decided by how it was made, not by
             # whether that template still exists)
             "template_summary": bool(
-                summary_path.is_file() and meta.template and meta.template != templates.BUILTIN_NAME
+                summary_path.is_file()
+                and (meta.summary_template or meta.template)  # older sessions lack the first
+                and (meta.summary_template or meta.template) != templates.BUILTIN_NAME
             ),
             "tracks": list(meta.tracks),
             "summary": summary_body(summary_path.read_text("utf-8"))
@@ -251,28 +274,34 @@ class App:
             raise VechoError("the title cannot be empty")
         session.meta.title = title[:200]
         session.save()
+        live = self._live
+        if live is not None and live.session.id == session_id:
+            live.session.refresh()  # so the recorder shows (and later saves) the new title
         return self.session_detail(session_id)
 
     def delete(self, session_id: str) -> None:
         session = self._session(session_id)
-        if self._status(session) in {"recording", "processing"}:
-            raise Conflict("this session is still being recorded or processed")
-        shutil.rmtree(session.dir)
-        self.processor.forget(session_id)
-        self._issues.pop(session_id, None)
+        with self._lock:  # no job may be queued between the check and the removal
+            if self._status(session) in {"recording", "processing"}:
+                raise Conflict("this session is still being recorded or processed")
+            shutil.rmtree(session.dir)
+            self.processor.forget(session_id)
+            self._issues.pop(session_id, None)
 
     def process(self, session_id: str, step: str, template: str | None = None) -> dict[str, Any]:
         session = self._session(session_id)
-        status = self._status(session)
-        if status == "recording":
-            raise Conflict("stop the recording first")
-        if status == "processing":
-            raise Conflict("this session is already being processed")
-        if step == "summarize" and not session.has_transcript:
-            step = "all"
-        self.processor.submit(
-            session, step, self._template_name(template) if template is not None else None
-        )
+        name = self._template_name(template) if template is not None else None
+        with self._lock:  # no delete between the check and queueing the job
+            status = self._status(session)
+            if status == "recording":
+                raise Conflict("stop the recording first")
+            if status == "processing":
+                raise Conflict("this session is already being processed")
+            if not session.dir.is_dir():
+                raise NotFound("no such session")
+            if step == "summarize" and not session.has_transcript:
+                step = "all"
+            self.processor.submit(session, step, name)
         return self.session_detail(session_id)
 
     # -- templates ----------------------------------------------------------------------------
@@ -321,9 +350,11 @@ class App:
             raise VechoError(f"unsupported file type '{suffix or filename}'")
         if length <= 0 or length > MAX_UPLOAD_BYTES:
             raise VechoError("the file is empty or too large")
-        session = self.store.create(Path(filename).stem)
+        session = self.store.create(unicodedata.normalize("NFC", Path(filename).stem))
         name = f"{roles.MIXED}{suffix}"
         target = session.path_for(name)
+        with self._lock:
+            self._uploading.add(session.id)  # shown as busy (not deletable) while uploading
         try:
             with target.open("wb") as out:
                 remaining = length
@@ -333,13 +364,16 @@ class App:
                         raise VechoError("the upload was interrupted")
                     out.write(chunk)
                     remaining -= len(chunk)
+            session.meta.tracks = {roles.MIXED: name}
+            session.meta.template = template
+            session.save()
+            self.processor.submit(session, "all")
         except BaseException:
             shutil.rmtree(session.dir, ignore_errors=True)
             raise
-        session.meta.tracks = {roles.MIXED: name}
-        session.meta.template = template
-        session.save()
-        self.processor.submit(session, "all")
+        finally:
+            with self._lock:
+                self._uploading.discard(session.id)
         return {"session_id": session.id}
 
     # -- audio playback -----------------------------------------------------------------------
@@ -356,9 +390,7 @@ class App:
         }
         if not tracks:
             raise NotFound("this session has no audio")
-        if len(tracks) == 1:
-            return tracks[0]
-        if any(path.suffix.lower() != ".wav" for path in tracks):
+        if len(tracks) == 1 and _plain_wav(tracks[0]):
             return tracks[0]
         mix = session.path_for(MIX_FILE)
         newest = max(path.stat().st_mtime for path in tracks)
@@ -430,6 +462,35 @@ def _read_block(wav: wave.Wave_read, frames: int) -> np.ndarray:
     return data
 
 
+def _plain_wav(path: Path) -> bool:
+    """A 16-bit PCM WAV the mixer and every browser can play as is."""
+    try:
+        with wave.open(str(path), "rb") as wav:
+            return wav.getsampwidth() == 2
+    except (wave.Error, EOFError, OSError):
+        return False
+
+
+def _as_plain_wav(path: Path, directory: Path) -> Path:
+    """``path`` itself if it is a plain WAV, else a 16 kHz mono copy decoded with FFmpeg (PyAV)."""
+    if _plain_wav(path):
+        return path
+    try:
+        from faster_whisper import decode_audio
+
+        samples = decode_audio(str(path), sampling_rate=16000)
+    except Exception as exc:
+        raise VechoError(f"cannot decode {path.name} for playback: {exc}") from exc
+    fd, name = tempfile.mkstemp(dir=directory, prefix=".decoded.", suffix=".wav")
+    os.close(fd)
+    with wave.open(name, "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(16000)
+        out.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+    return Path(name)
+
+
 def _padded_block(
     reader: wave.Wave_read, whole: np.ndarray | None, pad: int, position: int
 ) -> np.ndarray:
@@ -456,6 +517,14 @@ def _mix_wavs(paths: list[Path], target: Path, delays: dict[Path, float] | None 
     """
     delays = delays or {}
     with contextlib.ExitStack() as stack:
+        plain = [_as_plain_wav(path, target.parent) for path in paths]
+        for original, usable in zip(paths, plain, strict=True):
+            if usable != original:
+                stack.callback(usable.unlink, missing_ok=True)
+        delays = {
+            usable: delays.get(original, 0.0) for original, usable in zip(paths, plain, strict=True)
+        }
+        paths = plain
         readers = [stack.enter_context(wave.open(str(path), "rb")) for path in paths]
         rate = max(reader.getframerate() for reader in readers)
         pads = [int(round(delays.get(path, 0.0) * rate)) for path in paths]
@@ -587,7 +656,8 @@ class Handler(BaseHTTPRequestHandler):
         # a body is only "unread" when one was sent; set True once a route reads it
         self._consumed = (self.headers.get("Content-Length") or "0").strip() in {"", "0"}
         url = urllib.parse.urlsplit(self.path)
-        path = urllib.parse.unquote(url.path)
+        raw_path = url.path
+        path = urllib.parse.unquote(raw_path)
         query = urllib.parse.parse_qs(url.query)
         if not self._host_ok():
             self._error(HTTPStatus.FORBIDDEN, "bad host")
@@ -618,14 +688,22 @@ class Handler(BaseHTTPRequestHandler):
         if not self._token_ok(query):
             self._error(HTTPStatus.FORBIDDEN, "missing or wrong token")
             return
+        # Split before decoding, so a "/" inside a name ("a%2Fb") stays part of that name.
+        parts = [urllib.parse.unquote(p) for p in raw_path[len("/api/") :].strip("/").split("/")]
         try:
-            self._route(self.command, path[len("/api/") :].strip("/").split("/"), query)
+            self._route(self.command, parts, query)
         except NotFound as exc:
             self._error(HTTPStatus.NOT_FOUND, str(exc))
         except Conflict as exc:
             self._error(HTTPStatus.CONFLICT, str(exc))
         except (SessionError, VechoError) as exc:
             self._error(HTTPStatus.BAD_REQUEST, str(exc))
+        except (ConnectionError, BrokenPipeError):
+            raise  # the client went away; nothing to answer
+        except Exception as exc:  # never drop a request without an answer
+            self.log_error("unexpected error: %r", exc)
+            with contextlib.suppress(Exception):
+                self._error(HTTPStatus.INTERNAL_SERVER_ERROR, f"unexpected error: {exc}")
 
     def _route(self, method: str, parts: list[str], query: dict[str, list[str]]) -> None:
         app = self.app
