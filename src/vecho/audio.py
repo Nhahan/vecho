@@ -111,6 +111,7 @@ class TrackStats:
     frames: int
     peak: float
     overflows: int
+    error: str | None = None  # set when the source failed but audio was kept
 
     @property
     def duration(self) -> float:
