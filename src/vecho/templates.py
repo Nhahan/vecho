@@ -102,7 +102,9 @@ class TemplateStore:
         if self.root.is_dir():
             for path in sorted(self.root.glob("*.md"), key=lambda p: _name_of(p).lower()):
                 try:
-                    found.append(Template(_name_of(path), path.read_text("utf-8")))
+                    # a file saved in another encoding still lists (and can be fixed or deleted)
+                    body = path.read_text("utf-8", errors="replace")
+                    found.append(Template(_name_of(path), body))
                 except OSError:
                     continue
         return [Template(BUILTIN_NAME, "", builtin=True), *found]
@@ -146,13 +148,25 @@ class TemplateStore:
             )
         self.root.mkdir(parents=True, exist_ok=True)
         was_default = previous is not None and self.default_name() == previous
-        if previous and previous != name and self.get(previous).name == previous:
-            self._path(previous).unlink()  # also covers renames that only change letter case
-        path = self._path(name)
+        old = aside = None
         try:
-            write_text_atomic(path, body + "\n")
+            if previous and previous != name and self.get(previous).name == previous:
+                # Set the old file aside rather than deleting it: a failed write puts it back.
+                # (This also covers renames that only change letter case.)
+                old = self._path(previous)
+                aside = old.with_name(f".{old.name}.renaming")
+                os.replace(old, aside)
+            write_text_atomic(self._path(name), body + "\n")
         except OSError as exc:
-            raise TemplateError(f"could not save the template: {exc}", "template_name_bad") from exc
+            if old is not None and aside is not None and aside.exists():
+                with contextlib.suppress(OSError):
+                    os.replace(aside, old)
+            raise TemplateError(
+                f"could not save the template: {exc}", "template_save_failed"
+            ) from exc
+        if aside is not None:
+            with contextlib.suppress(OSError):
+                aside.unlink()
         if was_default:
             self.set_default(name)
         return Template(name, body + "\n")
@@ -167,7 +181,7 @@ class TemplateStore:
 
     def default_name(self) -> str:
         try:
-            name = (self.root / _DEFAULT_FILE).read_text("utf-8").strip()
+            name = (self.root / _DEFAULT_FILE).read_text("utf-8", errors="replace").strip()
         except OSError:
             return BUILTIN_NAME
         return self.get(name).name

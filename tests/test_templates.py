@@ -430,3 +430,27 @@ def test_delete_and_rename_accept_the_name_as_typed(tmp_path):
 def test_unassigned_characters_in_names_are_rejected(tmp_path):
     with pytest.raises(TemplateError):
         TemplateStore(tmp_path).save("\U00018df3", "## A\n")
+
+
+def test_a_failed_rename_keeps_the_template(tmp_path, monkeypatch):
+    from vecho import templates
+
+    store = TemplateStore(tmp_path)
+    store.save("a", "## A\n")
+
+    def fail(path, text):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(templates, "write_text_atomic", fail)
+    with pytest.raises(TemplateError) as caught:
+        store.save("b", "## B\n", previous="a")
+    assert caught.value.code == "template_save_failed"
+    assert [(t.name, t.body) for t in store.list()][1:] == [("a", "## A\n")]
+
+
+def test_a_template_in_another_encoding_still_lists(tmp_path):
+    store = TemplateStore(tmp_path)
+    (tmp_path / "옛 양식.md").write_bytes("## 요약\n".encode("cp949"))
+    (tmp_path / ".default").write_bytes("옛 양식".encode("cp949"))
+    assert [t.name for t in store.list()] == [BUILTIN_NAME, "옛 양식"]
+    assert store.default_name() == BUILTIN_NAME
