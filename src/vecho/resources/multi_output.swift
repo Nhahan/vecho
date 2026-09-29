@@ -2,6 +2,7 @@
 // and to a loopback device (BlackHole) at the same time, so vecho can hear system audio.
 //
 //   swift multi_output.swift list
+//   swift multi_output.swift describe [--name NAME]
 //   swift multi_output.swift create [--name NAME] [--output DEVICE_NAME] [--loopback SUBSTRING]
 //   swift multi_output.swift destroy [--name NAME]
 //
@@ -89,6 +90,22 @@ func defaultOutputDevice() -> Device? {
     return devices().first { $0.id == id }
 }
 
+func mainSubDeviceUID(_ id: AudioObjectID) -> String? {
+    stringProperty(id, kAudioAggregateDevicePropertyMainSubDevice)
+}
+
+/// Sub-devices that are actually running (configured ones CoreAudio cannot use are dropped).
+func activeSubDevices(_ id: AudioObjectID) -> [AudioObjectID] {
+    var addr = address(kAudioAggregateDevicePropertyActiveSubDeviceList)
+    var size: UInt32 = 0
+    guard AudioObjectGetPropertyDataSize(id, &addr, 0, nil, &size) == noErr, size > 0 else {
+        return []
+    }
+    var ids = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+    guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &ids) == noErr else { return [] }
+    return ids
+}
+
 func option(_ name: String, in args: [String]) -> String? {
     guard let index = args.firstIndex(of: name), index + 1 < args.count else { return nil }
     return args[index + 1]
@@ -136,6 +153,24 @@ func create(_ args: [String]) {
     var newID = AudioObjectID(0)
     let status = AudioHardwareCreateAggregateDevice(description as CFDictionary, &newID)
     if status != noErr { fail("CoreAudio refused to create the device (error \(status))") }
+
+    // CoreAudio accepts the configuration but silently deactivates sub-devices it cannot stack
+    // (e.g. another aggregate device), which would leave the user with no sound. Verify that both
+    // outputs are really running and the real output is the clock source, else undo.
+    func healthy() -> Bool {
+        let active = activeSubDevices(newID)
+        return active.contains(speakers.id) && active.contains(loopback.id)
+            && mainSubDeviceUID(newID) == speakers.uid
+    }
+    var ok = healthy()
+    for _ in 0..<10 where !ok {
+        Thread.sleep(forTimeInterval: 0.1)
+        ok = healthy()
+    }
+    guard ok else {
+        AudioHardwareDestroyAggregateDevice(newID)
+        fail("'\(speakers.name)' cannot be combined with the loopback device (virtual or aggregate output?)")
+    }
     print("created\t\(name)\t\(speakers.name)\t\(loopback.name)")
 }
 
@@ -144,6 +179,17 @@ switch args.first {
 case "list":
     for device in devices() {
         print("\(device.name)\t\(device.uid)\t\(device.inputs)\t\(device.outputs)")
+    }
+case "describe":
+    // Which physical device does the existing Multi-Output play through?
+    let all = devices()
+    if let multi = all.first(where: { $0.uid == deviceUID }),
+        let uid = mainSubDeviceUID(multi.id),
+        let main = all.first(where: { $0.uid == uid })
+    {
+        print("main\t\(main.name)\t\(main.uid)")
+    } else {
+        print("absent")
     }
 case "create":
     create(args)
@@ -156,5 +202,5 @@ case "destroy":
     destroy(device)
     print("destroyed\t\(device.name)")
 default:
-    fail("usage: multi_output.swift list | create [--name N] [--output NAME] [--loopback HINT] | destroy [--name N]")
+    fail("usage: multi_output.swift list | describe | create [--name N] [--output NAME] [--loopback HINT] | destroy [--name N]")
 }

@@ -305,9 +305,9 @@ def cmd_show(args: argparse.Namespace, config: Config) -> int:
 
 
 def cmd_setup(args: argparse.Namespace, config: Config) -> int:
-    """One-time preparation: create the Multi-Output device used to hear system audio."""
+    """Optional: pre-build the Multi-Output device (``record`` also builds it on demand)."""
     if args.remove:
-        removed = routing.remove_multi_output()
+        removed = routing.MultiOutput().remove()
         print(f"Removed '{routing.MULTI_OUTPUT_NAME}'." if removed else "Nothing to remove.")
         return 0
 
@@ -320,12 +320,12 @@ def cmd_setup(args: argparse.Namespace, config: Config) -> int:
         print(f"'{routing.MULTI_OUTPUT_NAME}' already exists (use --force to recreate it).")
         return 0
 
-    print(routing.create_multi_output(args.output))
+    print(routing.MultiOutput().create(args.output))
     if routing.MULTI_OUTPUT_NAME not in switcher.outputs():
         raise AudioError(
             "the device was created but macOS does not list it; try `vecho setup` again"
         )
-    print("Ready. `vecho record` now switches the sound output while recording and restores it.")
+    print("Ready. `vecho record` adapts it to whatever you listen on and restores the output.")
     return 0
 
 
@@ -357,14 +357,19 @@ def _doctor_routing(report: Callable[[str, str], None]) -> None:
         report("WARN", routing.SWITCH_INSTALL_HELP)
         return
     try:
-        outputs, current = switcher.outputs(), switcher.current()
+        current = switcher.current()
     except VechoError as exc:
         report("WARN", str(exc))
         return
-    if routing.MULTI_OUTPUT_NAME in outputs:
-        report("OK", f"'{routing.MULTI_OUTPUT_NAME}' exists (sound output now: {current})")
+    if routing.is_virtual_output(current) and current != routing.MULTI_OUTPUT_NAME:
+        report("WARN", f"sound output '{current}' is virtual; pick your speakers or headphones")
     else:
-        report("WARN", "no Multi-Output device; run `vecho setup`")
+        report("OK", f"sound output: {current} (captured automatically while recording)")
+    report(
+        "INFO",
+        "apps whose own output setting is fixed to one device (Discord, Zoom, ...) "
+        "must be set to 'Default' to be captured",
+    )
 
 
 def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
