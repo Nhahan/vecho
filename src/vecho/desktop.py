@@ -12,6 +12,7 @@ import os
 import signal
 import sys
 import threading
+import time
 import urllib.request
 import webbrowser
 from pathlib import Path
@@ -63,6 +64,30 @@ def _clear_instance(config: Config, token: str) -> None:
             path.unlink()
 
 
+def _instance_lock(config: Config) -> Any:
+    """An exclusive lock on the data directory held for the app's lifetime, or None if taken.
+
+    Checking app.json alone is racy: two launches at the same moment would both start.
+    """
+    path = config.home / "app.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a+")  # noqa: SIM115 - kept open (and locked) until the app exits
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
+
 def window_available() -> bool:
     return importlib.util.find_spec("webview") is not None
 
@@ -109,10 +134,16 @@ def run(
 ) -> int:
     out = out or sys.stderr
     stop = stop or threading.Event()
-    existing = running_instance(config)
-    if existing:
-        print(f"vecho is already running at {existing}", file=out)
-        if mode != HEADLESS:
+    lock = _instance_lock(config)
+    if lock is None:  # another vecho app owns this data directory
+        existing = None
+        for _ in range(50):  # it may still be starting up
+            existing = running_instance(config)
+            if existing:
+                break
+            time.sleep(0.1)
+        print(f"vecho is already running at {existing or 'another window'}", file=out)
+        if existing and mode != HEADLESS:
             webbrowser.open(existing)
         return 0
 
@@ -131,7 +162,11 @@ def run(
 
     try:
         if mode == WINDOW:
-            _show_window(server.url)
+            try:
+                _show_window(server.url)
+            finally:
+                if hasattr(signal, "pthread_sigmask"):  # Ctrl+C works again while shutting down
+                    signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)
         else:
             if mode == BROWSER:
                 webbrowser.open(server.url)
@@ -142,4 +177,5 @@ def run(
         server.shutdown()
         server.server_close()
         _clear_instance(config, app.token)
+        lock.close()
     return 0

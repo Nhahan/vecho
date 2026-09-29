@@ -39,3 +39,28 @@ def test_stale_instance_file_is_ignored(config):
         json.dumps({"url": "http://127.0.0.1:9/", "token": "x", "pid": 1}), "utf-8"
     )
     assert desktop.running_instance(config) is None
+
+
+def test_simultaneous_launches_start_only_one_app(config, monkeypatch):
+    monkeypatch.setattr(desktop.webbrowser, "open", lambda url: None)
+    stop = threading.Event()
+    first = threading.Thread(target=desktop.run, args=(config, 0, "none", io.StringIO(), stop))
+    first.start()
+    deadline = time.monotonic() + 10
+    while desktop.running_instance(config) is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    outputs = [io.StringIO() for _ in range(3)]  # these three race each other
+    others = [
+        threading.Thread(target=desktop.run, args=(config, 0, "none", out, threading.Event()))
+        for out in outputs
+    ]
+    for t in others:
+        t.start()
+    for t in others:
+        t.join(10)
+    assert all("already running" in out.getvalue() for out in outputs)
+    stop.set()
+    first.join(5)
+    lock = desktop._instance_lock(config)  # released on exit
+    assert lock is not None
+    lock.close()
