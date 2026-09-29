@@ -43,6 +43,7 @@ const T = KO ? {
   is_silent_me_d: "마이크가 연결되어 있고 이 앱의 마이크 사용이 허용되어 있는지 확인하세요.",
   is_stopped: "녹음이 중간에 끊겼습니다", is_stopped_d: "끊기기 전까지의 녹음은 저장되어 있습니다.",
   is_dropped: "소리가 잠깐 끊긴 구간이 있습니다", is_dropped_d: "컴퓨터가 바빴을 수 있습니다.",
+  is_bad_transcript: "대화 기록 파일을 읽을 수 없습니다", is_bad_transcript_d: "다시 받아쓰기를 하면 새로 만듭니다.",
   is_too_short: "녹음이 너무 짧아 정리하지 않았습니다", is_too_short_d: "",
   templateLabel: "요약 틀", templates: "요약 템플릿", templatesTip: "요약 템플릿",
   tplLede: "요약을 어떤 틀로 정리할지 정합니다. 예전에 쓴 노트나 회의록을 그대로 붙여 넣으면 그 제목과 구조대로 요약하고, 대화에 없는 항목은 비워 둡니다.",
@@ -65,6 +66,8 @@ const T = KO ? {
     title_empty: "제목을 입력하세요.", session_busy: "녹음하거나 정리하는 중이라 지금은 할 수 없습니다.",
     file_type: "지원하지 않는 파일 형식입니다. (mp3, m4a, wav, flac, ogg, webm)", file_size: "파일이 비어 있거나 너무 큽니다.",
     upload_interrupted: "파일을 올리다가 끊겼습니다. 다시 시도해 주세요.", no_audio: "이 녹음에는 재생할 소리가 없습니다.",
+    template_save_failed: "템플릿을 저장하지 못했습니다.", disk_full: "디스크 공간이 부족합니다. 공간을 비운 뒤 다시 시도해 주세요.",
+    request_too_large: "요청이 너무 큽니다.",
   },
 } : {
   start: "New recording", stop: "Stop and summarize", recording: "Recording", withRemote: "Include the other side",
@@ -102,6 +105,7 @@ const T = KO ? {
   is_silent_me_d: "Check that a microphone is connected and that this app may use it.",
   is_stopped: "Recording stopped partway through", is_stopped_d: "Everything up to that point was saved.",
   is_dropped: "Audio briefly dropped out", is_dropped_d: "The computer may have been busy.",
+  is_bad_transcript: "The transcript file can't be read", is_bad_transcript_d: "Transcribing again creates a new one.",
   is_too_short: "Too short to process", is_too_short_d: "",
   templateLabel: "Template", templates: "Summary templates", templatesTip: "Summary templates",
   tplLede: "Choose the shape of your summaries. Paste an old note or meeting minutes and vecho follows its headings and structure, leaving out anything the conversation did not cover.",
@@ -124,6 +128,8 @@ const T = KO ? {
     title_empty: "The title can't be empty.", session_busy: "Not possible while this recording is being recorded or processed.",
     file_type: "That file type isn't supported (mp3, m4a, wav, flac, ogg, webm).", file_size: "The file is empty or too large.",
     upload_interrupted: "The upload was interrupted. Please try again.", no_audio: "This recording has no audio to play.",
+    template_save_failed: "The template could not be saved.", disk_full: "The disk is full. Free up some space and try again.",
+    request_too_large: "The request is too large.",
   },
 };
 
@@ -676,7 +682,7 @@ function renderSession(opts) {
   else if (d.status === "recorded") status = noticeHtml("", T.pending, "", ["retry", T.processNow]);
   else if (d.status === "transcribed") status = noticeHtml("", T.noSummary, "", ["resummarize", T.processNow]);
   const issues = (d.issues || []).filter((i) => i.code !== "too_short" || d.status !== "summarized")
-    .map((i) => noticeHtml("", issueTitle(i), issueDetail(i))).join("");
+    .map((i) => noticeHtml("", issueTitle(i), issueDetail(i), i.code === "bad_transcript" && !working && d.tracks.length ? ["retry", T.retry] : null)).join("");
 
   let body = "";
   if (tab === "summary") {
