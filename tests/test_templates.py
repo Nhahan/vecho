@@ -1,3 +1,5 @@
+import unicodedata
+
 import pytest
 
 from vecho.templates import (
@@ -384,3 +386,47 @@ def test_windows_device_names_are_stored_safely(tmp_path, name):
 def test_dot_only_names_are_rejected(tmp_path, name):
     with pytest.raises(TemplateError):
         TemplateStore(tmp_path).save(name, "## A\n")
+
+
+def test_a_section_the_model_added_first_keeps_its_heading():
+    out = conform("## 참석자\n- 김철수, 이영희\n\n## 요약\n예산 확정", "## 요약\n## 결정 사항")
+    assert out.startswith("## 참석자\n- 김철수, 이영희\n")
+    assert "## 요약\n\n예산 확정" in out
+    assert conform(out, "## 요약\n## 결정 사항") == out
+
+
+def test_a_bare_title_before_the_sections_is_dropped():
+    assert conform("# 회의 요약\n\n## 요약\nx", "## 요약").startswith("## 요약")
+
+
+def test_hash_lines_in_code_blocks_are_not_headings():
+    summary = "## 요약\n배포 절차 확정\n\n```bash\n# 설치\npip install x\n```"
+    out = conform(summary, "## 요약\n## 설치")
+    assert "```bash\n# 설치\npip install x\n```" in out
+    assert out.index("```bash") < out.index("## 설치\n")
+
+
+def test_a_fact_starting_with_daeumeun_is_not_chatter():
+    out = conform("다음은 3분기 예산안이며 5억 원으로 확정.\n\n## 요약\nx", "## 요약")
+    assert out.startswith("다음은 3분기 예산안이며 5억 원으로 확정.")
+    for intro in ("다음은 템플릿에 맞춘 요약입니다.", "Sure! Here's the summary:"):
+        assert conform(f"{intro}\n\n## 요약\nx", "## 요약").startswith("## 요약")
+
+
+def test_horizontal_rules_are_not_placeholders():
+    assert drop_placeholders("## A\nx\n\n---\n\n## B\ny") == "## A\nx\n\n---\n\n## B\ny"
+    assert drop_placeholders("- **결정**: -") == "- **결정**"
+
+
+def test_delete_and_rename_accept_the_name_as_typed(tmp_path):
+    store = TemplateStore(tmp_path)
+    store.save("멘토링 노트", "## A\n")
+    store.save("새 이름", "## A\n", previous=unicodedata.normalize("NFD", "멘토링  노트"))
+    assert [t.name for t in store.list()][1:] == ["새 이름"]
+    store.delete(" 새 이름\r")
+    assert [t.name for t in store.list()][1:] == []
+
+
+def test_unassigned_characters_in_names_are_rejected(tmp_path):
+    with pytest.raises(TemplateError):
+        TemplateStore(tmp_path).save("\U00018df3", "## A\n")

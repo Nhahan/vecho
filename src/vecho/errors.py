@@ -2,7 +2,15 @@
 
 
 class VechoError(Exception):
-    """Base class for expected, user-facing failures."""
+    """Base class for expected, user-facing failures.
+
+    ``code`` (optional) names the failure for user interfaces, which show their own translated
+    text for known codes and fall back to the English message otherwise.
+    """
+
+    def __init__(self, message: str = "", code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ConfigError(VechoError):

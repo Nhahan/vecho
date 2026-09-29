@@ -45,14 +45,22 @@ def _check_name(name: str) -> str:
     # NFC: macOS hands out decomposed Hangul (NFD) in file names and drag-and-drop
     name = unicodedata.normalize("NFC", " ".join(name.split()))
     if not name or not name.strip("."):
-        raise TemplateError("the template needs a name")
+        raise TemplateError("the template needs a name", "template_name_empty")
     if len(name) > 60:
-        raise TemplateError("a template name can have at most 60 characters")
+        raise TemplateError("a template name can have at most 60 characters", "template_name_long")
     if name == BUILTIN_NAME:
-        raise TemplateError(f"'{BUILTIN_NAME}' is the built-in template; choose another name")
-    if any(ord(c) < 32 for c in name):
-        raise TemplateError("the template name contains control characters")
+        raise TemplateError(
+            f"'{BUILTIN_NAME}' is the built-in template; choose another name", "template_builtin"
+        )
+    # control characters, and code points file systems refuse (unassigned, surrogates)
+    if any(ord(c) < 32 or unicodedata.category(c) in ("Cc", "Cn", "Cs") for c in name):
+        raise TemplateError("the template name contains control characters", "template_name_bad")
     return name
+
+
+def _same_name(name: str) -> str:
+    """A name as the store lists it, for comparing names the user typed or pasted."""
+    return unicodedata.normalize("NFC", " ".join(name.split()))
 
 
 _RESERVED = re.compile(r"(?:con|prn|aux|nul|com\d|lpt\d)(?:\..*)?", re.IGNORECASE)  # Windows
@@ -104,7 +112,7 @@ class TemplateStore:
 
         Matching goes through the listing rather than the file system, which may ignore case.
         """
-        wanted = unicodedata.normalize("NFC", " ".join((name or "").split()))
+        wanted = _same_name(name or "")
         if wanted and wanted != BUILTIN_NAME:
             for template in self.list()[1:]:
                 if template.name == wanted:
@@ -114,31 +122,45 @@ class TemplateStore:
     def save(self, name: str, body: str, previous: str | None = None) -> Template:
         """Create or update a template; ``previous`` renames an existing one."""
         name = _check_name(name)
+        if previous is not None:
+            previous = _same_name(previous)
         body = body.strip()
         if not headings(body):
-            raise TemplateError("a template needs at least one heading (a line starting with #)")
+            raise TemplateError(
+                "a template needs at least one heading (a line starting with #)",
+                "template_no_heading",
+            )
         if len(body) > MAX_TEMPLATE_CHARS:
-            raise TemplateError(f"a template can have at most {MAX_TEMPLATE_CHARS} characters")
+            raise TemplateError(
+                f"a template can have at most {MAX_TEMPLATE_CHARS} characters", "template_too_long"
+            )
         existing = {t.name.casefold(): t.name for t in self.list()[1:]}
         clash = existing.get(name.casefold())
         renaming = previous is not None and previous != name
         if clash is not None and clash != previous and (clash != name or renaming):
-            raise TemplateError(f"a template named '{clash}' already exists")
+            raise TemplateError(f"a template named '{clash}' already exists", "template_exists")
         if clash is None and name.casefold() == BUILTIN_NAME.casefold():
-            raise TemplateError(f"'{BUILTIN_NAME}' is the built-in template; choose another name")
+            raise TemplateError(
+                f"'{BUILTIN_NAME}' is the built-in template; choose another name",
+                "template_builtin",
+            )
         self.root.mkdir(parents=True, exist_ok=True)
         was_default = previous is not None and self.default_name() == previous
         if previous and previous != name and self.get(previous).name == previous:
             self._path(previous).unlink()  # also covers renames that only change letter case
         path = self._path(name)
-        write_text_atomic(path, body + "\n")
+        try:
+            write_text_atomic(path, body + "\n")
+        except OSError as exc:
+            raise TemplateError(f"could not save the template: {exc}", "template_name_bad") from exc
         if was_default:
             self.set_default(name)
         return Template(name, body + "\n")
 
     def delete(self, name: str) -> None:
+        name = _same_name(name)
         if self.get(name).name != name:
-            raise TemplateError(f"no template named '{name}'")
+            raise TemplateError(f"no template named '{name}'", "template_missing")
         self._path(name).unlink()
         if self.default_name() == name:
             self.set_default(BUILTIN_NAME)
@@ -152,8 +174,8 @@ class TemplateStore:
 
     def set_default(self, name: str) -> str:
         template = self.get(name)
-        if template.name != unicodedata.normalize("NFC", " ".join(name.split())):
-            raise TemplateError(f"no template named '{name}'")
+        if template.name != _same_name(name):
+            raise TemplateError(f"no template named '{name}'", "template_missing")
         self.root.mkdir(parents=True, exist_ok=True)
         write_text_atomic(self.root / _DEFAULT_FILE, template.name)
         return template.name
@@ -303,8 +325,8 @@ def drop_placeholders(summary: str) -> str:
                 continue
             kept.append(line)
             continue
-        if _HEADING.match(stripped):
-            kept.append(line)
+        if _HEADING.match(stripped) or re.fullmatch(r"[-*_](?:\s*[-*_]){2,}", stripped):
+            kept.append(line)  # headings and rules ("---" is not a "none" dash)
             continue
         prefix = _PREFIX.match(line).group(1)
         rest = line[len(prefix) :]
@@ -322,10 +344,14 @@ def _split_sections(markdown: str) -> tuple[list[str], list[tuple[str, list[str]
     """Leading lines, then ``(heading line, body lines)`` for every heading."""
     preamble: list[str] = []
     sections: list[tuple[str, list[str]]] = []
+    in_code = False
     for line in markdown.splitlines():
-        if _HEADING.match(line.strip()):
+        if line.lstrip().startswith("```"):
+            in_code = not in_code
+        elif not in_code and _HEADING.match(line.strip()):
             sections.append((line.strip(), []))
-        elif sections:
+            continue
+        if sections:
             sections[-1][1].append(line)
         else:
             preamble.append(line)
@@ -338,18 +364,43 @@ def _key(text: str) -> str:
 
 
 # An answer's opening remark, not part of the notes: "다음은 요약입니다:", "Here is the summary".
-_CHATTER = re.compile(
-    r"(?:다음은|아래는|요청하신|이\s*템플릿|템플릿에\s*맞춰|here\s+(?:is|are)|below\s+is|sure|certainly)"
-    r".*|.*[:：]\s*$",
+# Only short lines about the answer itself: "다음은 3분기 예산안이며 …" is a fact, not chatter.
+_OPENER = re.compile(
+    r"(?:다음은|아래는|요청하신|이\s*템플릿|템플릿에\s*맞춰|here\s+(?:is|are)|here's|below\s+is|sure|certainly)",
     re.IGNORECASE,
+)
+_ABOUT_ANSWER = re.compile(
+    r"요약|정리|회의록|노트|템플릿|양식|작성|summar|notes|template", re.IGNORECASE
 )
 
 
-def _is_content(line: str) -> bool:
+def _is_chatter(line: str) -> bool:
     stripped = line.strip()
-    if stripped.startswith("```") or _HEADING.match(stripped):
+    if not stripped or len(stripped) > 80 or _HEADING.match(stripped):
         return False
-    return not _CHATTER.fullmatch(stripped)
+    if re.search(r"[:：]$", stripped) and not re.match(r"[-*+]|\d+[.)]|\*\*", stripped):
+        return True  # "요약은 다음과 같습니다:" (a labelled item is content)
+    return bool(_OPENER.match(stripped)) and (
+        bool(_ABOUT_ANSWER.search(stripped)) or len(stripped) <= 20
+    )
+
+
+def _lead(preamble: list[str]) -> list[str]:
+    """What the model wrote before the first template heading, minus its opening remarks.
+
+    Bare titles with nothing under them go, and so does a stray fence line (from a
+    half-unwrapped ```markdown answer); balanced code blocks and headings with content stay.
+    """
+    fences = [i for i, line in enumerate(preamble) if line.lstrip().startswith("```")]
+    drop = set(fences) if len(fences) % 2 else set()
+    drop |= {i for i, line in enumerate(preamble) if _is_chatter(line)}
+    for i, line in enumerate(preamble):
+        if _HEADING.match(line.strip()):  # a bare title ("# 회의 요약") with nothing under it
+            below = (p for j, p in enumerate(preamble[i + 1 :], i + 1) if j not in drop)
+            following = next((p for p in below if p.strip()), "")
+            if not following or _HEADING.match(following.strip()):
+                drop.add(i)
+    return [line for i, line in enumerate(preamble) if i not in drop]
 
 
 def conform(summary: str, body: str) -> str:
@@ -404,7 +455,7 @@ def conform(summary: str, body: str) -> str:
         return lines
 
     out: list[str] = []
-    lead = trimmed([line for line in preamble if _is_content(line)])
+    lead = trimmed(_lead(preamble))
     if lead:  # facts the model wrote before the first template heading are kept, not lost
         out += [*lead, ""]
     for index, (level, text) in enumerate(wanted):
