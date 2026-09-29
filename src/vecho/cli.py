@@ -1,4 +1,4 @@
-"""Command-line interface: ``vecho record | import | transcribe | summarize | list | show``."""
+"""Command-line interface: ``vecho setup | record | import | transcribe | summarize | ...``."""
 
 from __future__ import annotations
 
@@ -10,10 +10,10 @@ import shutil
 import signal
 import sys
 import threading
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
-from . import __version__, audio, roles
+from . import __version__, audio, roles, routing
 from .config import Config, load_config
 from .errors import AudioError, SessionError, VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_MD, Session, SessionStore
@@ -23,10 +23,9 @@ from .transcript import format_duration
 
 NO_LOOPBACK_HELP = (
     "no loopback device found to capture the other party's audio.\n"
-    "  1. brew install --cask blackhole-2ch\n"
-    "  2. In Audio MIDI Setup, create a Multi-Output Device containing your speakers or\n"
-    "     headphones and BlackHole, and select it as the system output.\n"
-    "  3. Run `vecho devices` to check that BlackHole is listed.\n"
+    "  1. brew install --cask blackhole-2ch   (asks for your password)\n"
+    "     then `sudo killall coreaudiod` (or reboot) so that macOS loads the driver\n"
+    "  2. vecho setup                          (creates the Multi-Output device)\n"
     "Use --mic-only to record just the microphone, or --remote to choose another device."
 )
 
@@ -96,6 +95,41 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
         selected.append((roles.REMOTE, remote))
 
     session = SessionStore(config.sessions_dir).create(args.title or "")
+    needs_routing = not args.mic_only and selected[-1][1].is_loopback and not args.no_routing
+    router = routing.OutputRouter(
+        config.home / "output-restore.json",
+        warn=lambda message: _eprint(f"warning: {message}"),
+        enabled=needs_routing,
+    )
+    with router:  # the previous sound output is restored as soon as capturing ends
+        stats = _capture(session, selected, config)
+
+    session.meta.duration_sec = max(s.duration for s in stats)
+    session.save()
+    _eprint(f"Saved {format_duration(session.meta.duration_sec)} of audio.")
+    for stat in stats:
+        label = config.label_for(stat.role)
+        if stat.silent:
+            _eprint(
+                f"warning: the {label} track is silent; check that audio is routed to "
+                f"'{_device_name(selected, stat.role)}'."
+            )
+        if stat.overflows:
+            _eprint(f"warning: the {label} track dropped audio {stat.overflows} time(s).")
+
+    if session.meta.duration_sec < _TOO_SHORT_SEC:
+        _eprint("The recording is too short to process; the audio was kept.")
+        return 0
+    if args.no_process:
+        _eprint(f"Next: vecho transcribe {session.id} && vecho summarize {session.id}")
+        return 0
+    return _process(session, config)
+
+
+def _capture(
+    session: Session, selected: Sequence[tuple[str, audio.InputDevice]], config: Config
+) -> list[audio.TrackStats]:
+    """Record until the user stops it; the audio files are finalized even on interruption."""
     recorder = audio.Recorder(
         [
             audio.TrackRecorder(role, device, session.path_for(f"{role}.wav"), config.sample_rate)
@@ -122,28 +156,7 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
         with contextlib.suppress(VechoError):
             recorder.stop()
         raise
-    stats = recorder.stop()
-
-    session.meta.duration_sec = max(s.duration for s in stats)
-    session.save()
-    _eprint(f"Saved {format_duration(session.meta.duration_sec)} of audio.")
-    for stat in stats:
-        label = config.label_for(stat.role)
-        if stat.silent:
-            _eprint(
-                f"warning: the {label} track is silent; check that audio is routed to "
-                f"'{_device_name(selected, stat.role)}'."
-            )
-        if stat.overflows:
-            _eprint(f"warning: the {label} track dropped audio {stat.overflows} time(s).")
-
-    if session.meta.duration_sec < _TOO_SHORT_SEC:
-        _eprint("The recording is too short to process; the audio was kept.")
-        return 0
-    if args.no_process:
-        _eprint(f"Next: vecho transcribe {session.id} && vecho summarize {session.id}")
-        return 0
-    return _process(session, config)
+    return recorder.stop()
 
 
 def _device_name(selected: Sequence[tuple[str, audio.InputDevice]], role: str) -> str:
@@ -288,6 +301,34 @@ def cmd_show(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- setup
+
+
+def cmd_setup(args: argparse.Namespace, config: Config) -> int:
+    """One-time preparation: create the Multi-Output device used to hear system audio."""
+    if args.remove:
+        removed = routing.remove_multi_output()
+        print(f"Removed '{routing.MULTI_OUTPUT_NAME}'." if removed else "Nothing to remove.")
+        return 0
+
+    if audio.find_loopback_device(audio.list_input_devices()) is None:
+        raise AudioError(NO_LOOPBACK_HELP)
+    switcher = routing.OutputSwitcher()
+    if not switcher.available:
+        raise AudioError(routing.SWITCH_INSTALL_HELP)
+    if routing.MULTI_OUTPUT_NAME in switcher.outputs() and not args.force:
+        print(f"'{routing.MULTI_OUTPUT_NAME}' already exists (use --force to recreate it).")
+        return 0
+
+    print(routing.create_multi_output(args.output))
+    if routing.MULTI_OUTPUT_NAME not in switcher.outputs():
+        raise AudioError(
+            "the device was created but macOS does not list it; try `vecho setup` again"
+        )
+    print("Ready. `vecho record` now switches the sound output while recording and restores it.")
+    return 0
+
+
 # ------------------------------------------------------------------------ diagnosis
 
 
@@ -308,6 +349,22 @@ def cmd_devices(args: argparse.Namespace, config: Config) -> int:
             f"{device.default_samplerate:.0f}Hz{note}"
         )
     return 0
+
+
+def _doctor_routing(report: Callable[[str, str], None]) -> None:
+    switcher = routing.OutputSwitcher()
+    if not switcher.available:
+        report("WARN", routing.SWITCH_INSTALL_HELP)
+        return
+    try:
+        outputs, current = switcher.outputs(), switcher.current()
+    except VechoError as exc:
+        report("WARN", str(exc))
+        return
+    if routing.MULTI_OUTPUT_NAME in outputs:
+        report("OK", f"'{routing.MULTI_OUTPUT_NAME}' exists (sound output now: {current})")
+    else:
+        report("WARN", "no Multi-Output device; run `vecho setup`")
 
 
 def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
@@ -334,6 +391,8 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
             report("OK", f"loopback device: {loopback.name}")
         else:
             report("WARN", "no loopback device (BlackHole); only --mic-only recording will work")
+        if loopback:
+            _doctor_routing(report)
 
     if importlib.util.find_spec("faster_whisper"):
         report("OK", f"faster-whisper installed (model: {config.whisper_model})")
@@ -393,6 +452,11 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--mic", help="microphone device index or name (default: system default)")
     record.add_argument("--remote", help="loopback device index or name (default: auto-detect)")
     record.add_argument("--mic-only", action="store_true", help="record only the microphone")
+    record.add_argument(
+        "--no-routing",
+        action="store_true",
+        help="do not switch the sound output to the Multi-Output device while recording",
+    )
     _add_pipeline_options(record)
 
     imp = add("import", cmd_import, "create a session from existing audio files")
@@ -416,6 +480,11 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("session", nargs="?", default="latest", help="id, prefix or 'latest'")
     show.add_argument("--transcript", action="store_true", help="print the transcript instead")
     show.add_argument("--path", action="store_true", help="print the session directory")
+
+    setup = add("setup", cmd_setup, "create the Multi-Output device used to capture system audio")
+    setup.add_argument("--output", help="speakers/headphones to play through (default: current)")
+    setup.add_argument("--force", action="store_true", help="recreate the device if it exists")
+    setup.add_argument("--remove", action="store_true", help="delete the device instead")
 
     add("devices", cmd_devices, "list audio input devices")
     add("doctor", cmd_doctor, "check microphone, loopback, Whisper and Ollama")

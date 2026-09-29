@@ -4,7 +4,7 @@ from datetime import datetime
 import numpy as np
 import pytest
 
-from vecho import audio, cli
+from vecho import audio, cli, routing
 from vecho.audio import InputDevice
 from vecho.errors import SummarizationError, TranscriptionError
 from vecho.session import SessionStore
@@ -307,3 +307,96 @@ def test_meter_scales_with_level():
     assert cli._meter(0.0) == "░" * 8
     assert cli._meter(1.0) == "█" * 8
     assert 0 < cli._meter(0.02).count("█") < 8
+
+
+# ---- output routing & setup -----------------------------------------------------------
+
+
+def test_record_routes_output_while_recording_and_restores(rig, switcher, monkeypatch):
+    switcher._outputs.append(routing.MULTI_OUTPUT_NAME)
+    seen = {}
+
+    def speak(recorder, config):
+        seen["during"] = switcher.current()
+        rig.speak(0, 4000)
+        rig.speak(2, 2000)
+
+    monkeypatch.setattr(cli, "_wait_for_stop", speak)
+    stub_pipeline(monkeypatch)
+    assert cli.main(["record"]) == 0
+    assert seen["during"] == routing.MULTI_OUTPUT_NAME
+    assert switcher.current() == "Speakers"  # back to normal before processing starts
+
+
+def test_record_restores_output_even_when_interrupted(rig, switcher, monkeypatch):
+    switcher._outputs.append(routing.MULTI_OUTPUT_NAME)
+
+    def interrupted(recorder, config):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "_wait_for_stop", interrupted)
+    assert cli.main(["record", "--no-process"]) == 130
+    assert switcher.current() == "Speakers"
+
+
+@pytest.mark.parametrize("flags", [["--no-routing"], ["--mic-only"]])
+def test_record_can_skip_routing(rig, switcher, monkeypatch, flags):
+    switcher._outputs.append(routing.MULTI_OUTPUT_NAME)
+    monkeypatch.setattr(cli, "_wait_for_stop", lambda r, c: rig.speak(0, 4000))
+    assert cli.main(["record", "--no-process", *flags]) == 0
+    assert switcher.calls == []
+
+
+def test_setup_creates_the_device(monkeypatch, switcher, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
+
+    def create(output=None, run=None):
+        switcher._outputs.append(routing.MULTI_OUTPUT_NAME)
+        return f"{routing.MULTI_OUTPUT_NAME}: Speakers + BlackHole 2ch (output={output})"
+
+    monkeypatch.setattr(routing, "create_multi_output", create)
+    assert cli.main(["setup", "--output", "Speakers"]) == 0
+    out = capsys.readouterr().out
+    assert "Speakers + BlackHole 2ch" in out and "Ready" in out
+
+
+def test_setup_is_idempotent_unless_forced(monkeypatch, switcher, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
+    switcher._outputs.append(routing.MULTI_OUTPUT_NAME)
+    created = []
+    monkeypatch.setattr(
+        routing, "create_multi_output", lambda output=None: created.append(1) or "x"
+    )
+    assert cli.main(["setup"]) == 0
+    assert "already exists" in capsys.readouterr().out and created == []
+    assert cli.main(["setup", "--force"]) == 0
+    assert created == [1]
+
+
+def test_setup_needs_blackhole_first(monkeypatch, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
+    assert cli.main(["setup"]) == 1
+    assert "blackhole-2ch" in capsys.readouterr().err
+
+
+def test_setup_needs_the_switch_tool(monkeypatch, switcher, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
+    switcher.available = False
+    assert cli.main(["setup"]) == 1
+    assert "switchaudio-osx" in capsys.readouterr().err
+
+
+def test_setup_remove(monkeypatch, capsys):
+    monkeypatch.setattr(routing, "remove_multi_output", lambda: True)
+    assert cli.main(["setup", "--remove"]) == 0
+    assert "Removed" in capsys.readouterr().out
+
+
+def test_doctor_reports_routing_state(monkeypatch, switcher, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
+    monkeypatch.setattr(cli.OllamaClient, "has_model", lambda self: True)
+    cli.main(["doctor"])
+    assert "run `vecho setup`" in capsys.readouterr().out
+    switcher._outputs.append(routing.MULTI_OUTPUT_NAME)
+    assert cli.main(["doctor"]) == 0
+    assert "exists (sound output now: Speakers)" in capsys.readouterr().out
