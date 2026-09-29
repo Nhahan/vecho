@@ -126,9 +126,19 @@ def test_macos_version_gate(monkeypatch, version, supported):
     assert systemaudio.is_supported() is supported
 
 
-def test_not_supported_off_macos(monkeypatch):
-    monkeypatch.setattr(systemaudio.platform, "system", lambda: "Linux")
-    assert not systemaudio.is_supported()
+@pytest.mark.parametrize(
+    ("system", "supported"), [("Linux", True), ("Windows", True), ("FreeBSD", False)]
+)
+def test_support_on_other_platforms(monkeypatch, system, supported):
+    monkeypatch.setattr(systemaudio.platform, "system", lambda: system)
+    assert systemaudio.is_supported() is supported
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux", "Windows", "FreeBSD"])
+def test_install_hint_exists_for_every_platform(monkeypatch, system):
+    monkeypatch.setattr(systemaudio.platform, "system", lambda: system)
+    monkeypatch.setattr(systemaudio.platform, "mac_ver", lambda: ("13.0", ("", "", ""), ""))
+    assert systemaudio.install_hint()
 
 
 def test_prepare_explains_old_macos(monkeypatch, tmp_path):

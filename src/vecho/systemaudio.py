@@ -1,4 +1,9 @@
-"""Driverless capture of everything the Mac plays, via a Core Audio process tap.
+"""Driverless capture of everything the computer plays ("the other party").
+
+macOS: a Core Audio process tap (below). Windows and Linux: the loopback of the default
+output device, see :mod:`vecho.loopback`.
+
+On macOS:
 
 No virtual audio device, no change to the sound output and no admin rights are involved,
 so nothing shows up in the user's sound settings. It works with any output (speakers,
@@ -37,18 +42,26 @@ _READ_SIZE = 65536
 SYSTEM_AUDIO_NAME = "System audio (all apps)"
 
 
+MAC_SILENCE_HINT = (
+    "allow your terminal under System Settings > Privacy & Security > "
+    "Screen & System Audio Recording, and check that something is playing"
+)
+OTHER_SILENCE_HINT = "check that something is playing through the default sound output"
+
+TAP = "tap"
+LOOPBACK = "loopback"
+
+
 @dataclass(frozen=True)
 class SystemAudioSource:
     """Stands in for an input device when the other party is captured from system audio."""
 
-    command: tuple[str, ...]
+    command: tuple[str, ...] = ()
+    backend: str = TAP
     name: str = SYSTEM_AUDIO_NAME
     index: int = -1
     is_loopback: bool = False  # no sound-output routing is ever needed
-    silence_hint: str = (
-        "allow your terminal under System Settings > Privacy & Security > "
-        "Screen & System Audio Recording, and check that something is playing"
-    )
+    silence_hint: str = MAC_SILENCE_HINT
 
 
 def macos_version() -> tuple[int, ...]:
@@ -61,8 +74,23 @@ def macos_version() -> tuple[int, ...]:
 
 
 def is_supported() -> bool:
-    """True when this macOS can tap system audio."""
-    return macos_version()[:2] >= MIN_MACOS
+    """True when this computer can capture system audio without extra software."""
+    system = platform.system()
+    if system == "Darwin":
+        return macos_version()[:2] >= MIN_MACOS
+    return system in {"Windows", "Linux"}
+
+
+def install_hint() -> str:
+    """What to do when system audio cannot be captured on this platform."""
+    system = platform.system()
+    if system == "Darwin":
+        if macos_version()[:2] >= MIN_MACOS:
+            return "Install the Xcode command line tools: xcode-select --install"
+        return "Update to macOS 14.4 or later, or install BlackHole (see the README)."
+    if system == "Linux":
+        return "Use PulseAudio or PipeWire (with pipewire-pulse) and install libpulse."
+    return "Check that a sound output device is enabled in the sound settings."
 
 
 def _script_text() -> str:
@@ -106,6 +134,21 @@ def build_helper(bin_dir: Path) -> Path:
 
 def prepare(bin_dir: Path) -> SystemAudioSource:
     """Return a ready-to-record source, or raise AudioError explaining why not."""
+    if platform.system() in {"Windows", "Linux"}:
+        from . import loopback
+
+        sc = loopback.load_soundcard()
+        try:
+            speaker, _ = loopback.open_loopback(sc)
+        except AudioError:
+            raise
+        except Exception as exc:
+            raise AudioError(f"system audio capture is unavailable: {exc}") from exc
+        return SystemAudioSource(
+            backend=LOOPBACK,
+            name=f"{SYSTEM_AUDIO_NAME} — {speaker.name}",
+            silence_hint=OTHER_SILENCE_HINT,
+        )
     if not is_supported():
         found = ".".join(map(str, macos_version())) or platform.system()
         raise AudioError(

@@ -11,6 +11,8 @@ keywords = ["voice", "recording", "transcription", "summarization", "whisper", "
 classifiers = [
     "Environment :: Console",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Topic :: Multimedia :: Sound/Audio :: Capture/Recording",
 ]
@@ -18,7 +20,11 @@ dependencies = [
     "numpy>=1.26",
     "sounddevice>=0.5",
     "faster-whisper>=1.1.0",
+    "soundcard>=0.4.3; sys_platform != 'darwin'",
 ]
+
+[project.optional-dependencies]
+desktop = ["pywebview>=5.0"]
 
 [project.scripts]
 vecho = "vecho.cli:main"
