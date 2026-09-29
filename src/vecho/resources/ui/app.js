@@ -48,6 +48,17 @@ const T = KO ? {
   is_stopped: "녹음이 중간에 끊겼습니다", is_stopped_d: "끊기기 전까지의 녹음은 저장되어 있습니다.",
   is_dropped: "소리가 잠깐 끊긴 구간이 있습니다", is_dropped_d: "컴퓨터가 바빴을 수 있습니다.",
   is_too_short: "녹음이 너무 짧아 정리하지 않았습니다", is_too_short_d: "",
+  templateLabel: "요약 틀", templates: "요약 템플릿", templatesTip: "요약 템플릿",
+  tplLede: "요약을 어떤 틀로 정리할지 정합니다. 예전에 쓴 노트나 회의록을 그대로 붙여 넣으면 그 제목과 구조대로 요약하고, 대화에 없는 항목은 비워 둡니다.",
+  newTemplate: "새 템플릿", edit: "편집", makeDefault: "기본으로", isDefault: "기본", builtin: "내장",
+  builtinDesc: "한 줄 요약 · 핵심 내용 · 결정 사항 · 액션 아이템 · 미해결 질문",
+  sectionsN: (n) => `섹션 ${n}개`, tplName: "이름", tplBody: "템플릿 (Markdown)", tplNamePh: "예: 멘토링 노트",
+  tplBodyPh: "## 1. 현황\n\n- **지원 현황**\n- **면접**\n\n## 2. 이번 주 숙제\n\n1. ",
+  outline: "요약에 들어갈 섹션", noSections: "# 로 시작하는 제목 줄이 있어야 합니다.",
+  tplHint: "<b>예시 내용이 들어 있어도 괜찮습니다.</b> 제목·굵은 항목 이름·표의 열 같은 구조만 따르고, 예시의 사실은 옮겨 적지 않습니다. 대화에서 채울 수 없는 항목은 비워 둡니다. 섹션 제목은 그대로 쓰이므로 날짜처럼 매번 바뀌는 내용은 제목에서 빼 두세요. 들여 쓴 소제목은 대화에 해당 내용이 있을 때만 들어갑니다.",
+  save: "저장", tplSaved: "템플릿을 저장했습니다", tplDeleted: "템플릿을 삭제했습니다",
+  tplDelTitle: "이 템플릿을 삭제할까요?", tplDelBody: "이미 만든 요약은 그대로 남습니다.",
+  summarizeWith: "이 템플릿으로 다시 요약", manageTemplates: "템플릿 관리…", back: "돌아가기",
 } : {
   start: "New recording", stop: "Stop and summarize", recording: "Recording", withRemote: "Include the other side",
   untitled: "Untitled", untitledAt: (t) => `Conversation at ${t}`, titlePh: "Add a title", systemAudio: "System audio (all apps)", search: "Search", importTip: "Import an audio file",
@@ -89,6 +100,17 @@ const T = KO ? {
   is_stopped: "Recording stopped partway through", is_stopped_d: "Everything up to that point was saved.",
   is_dropped: "Audio briefly dropped out", is_dropped_d: "The computer may have been busy.",
   is_too_short: "Too short to process", is_too_short_d: "",
+  templateLabel: "Template", templates: "Summary templates", templatesTip: "Summary templates",
+  tplLede: "Choose the shape of your summaries. Paste an old note or meeting minutes and vecho follows its headings and structure, leaving out anything the conversation did not cover.",
+  newTemplate: "New template", edit: "Edit", makeDefault: "Make default", isDefault: "Default", builtin: "Built-in",
+  builtinDesc: "TL;DR · Key points · Decisions · Action items · Open questions",
+  sectionsN: (n) => `${n} section${n === 1 ? "" : "s"}`, tplName: "Name", tplBody: "Template (Markdown)", tplNamePh: "e.g. Mentoring notes",
+  tplBodyPh: "## 1. Status\n\n- **Applications**\n- **Interviews**\n\n## 2. Homework\n\n1. ",
+  outline: "Sections of the summary", noSections: "Add at least one heading line starting with #.",
+  tplHint: "<b>Example content is fine.</b> Only the structure is used — headings, bold labels, table columns. The example's facts are never copied, and sections the conversation doesn't cover stay empty. Headings are kept verbatim, so leave things like dates out of them. Indented sub-headings appear only when the conversation has something for them.",
+  save: "Save", tplSaved: "Template saved", tplDeleted: "Template deleted",
+  tplDelTitle: "Delete this template?", tplDelBody: "Summaries already made with it stay as they are.",
+  summarizeWith: "Summarize again with this template", manageTemplates: "Manage templates…", back: "Back",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -220,6 +242,124 @@ function renderSummary(md, id) {
   return html;
 }
 
+/* ================================================================ markdown (template summaries) */
+
+function mdInline(text) {
+  return esc(text)
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+}
+
+// Renders the Markdown a template summary uses: headings, lists (nested, ordered, tasks),
+// tables, quotes, rules and code. Everything is escaped first; no raw HTML passes through.
+function renderMarkdown(md, id) {
+  const lines = md.replace(/\t/g, "    ").split("\n");
+  const checks = saved.get("checks:" + id, {});
+  const out = [];
+  let i = 0, taskIndex = 0;
+  const indentOf = (l) => l.match(/^ */)[0].length;
+  const LIST = /^(\s*)([-*+]|\d+[.)])\s+(.*)$|^(\s*)([-*+]|\d+[.)])\s*$/;
+  const isTable = (k) => /^\s*\|/.test(lines[k] || "") && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[k + 1] || "") && (lines[k + 1] || "").includes("-");
+
+  function renderList(start) {
+    // collect the block
+    const items = [];
+    let k = start;
+    while (k < lines.length) {
+      const line = lines[k];
+      if (!line.trim()) { k++; continue; }
+      const m = line.match(LIST);
+      if (m) {
+        const indent = (m[1] ?? m[4]).length;
+        const marker = m[2] ?? m[5];
+        items.push({ indent, ordered: /\d/.test(marker), text: (m[3] ?? "").trim(), extra: [], children: [] });
+        k++; continue;
+      }
+      if (indentOf(line) > 0 && items.length) { items[items.length - 1].extra.push(line.trim()); k++; continue; }
+      break;
+    }
+    // nest by indentation
+    const root = { indent: -1, children: [] };
+    const stack = [root];
+    for (const item of items) {
+      while (stack.length > 1 && item.indent <= stack[stack.length - 1].indent) stack.pop();
+      stack[stack.length - 1].children.push(item);
+      stack.push(item);
+    }
+    const html = (nodes) => {
+      if (!nodes.length) return "";
+      const tag = nodes[0].ordered ? "ol" : "ul";
+      return `<${tag}>` + nodes.map((n) => {
+        const task = n.text.match(/^\[([ xX])\]\s*(.*)$/);
+        const extra = n.extra.map((e) => `<p>${mdInline(e)}</p>`).join("");
+        if (task) {
+          const key = "t" + (taskIndex++);
+          const done = key in checks ? checks[key] : task[1] !== " ";
+          return `<li class="task ${done ? "done" : ""}"><input type="checkbox" data-check="${key}" ${done ? "checked" : ""}><span>${mdInline(task[2])}</span>${extra}${html(n.children)}</li>`;
+        }
+        if (!n.text && !n.extra.length && !n.children.length) return "";  // an empty "-" stays empty
+        return `<li>${mdInline(n.text)}${extra}${html(n.children)}</li>`;
+      }).join("") + `</${tag}>`;
+    };
+    return [html(root.children), k];
+  }
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) { i++; continue; }
+    if (trimmed.startsWith("```")) {
+      const body = [];
+      i++;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) body.push(lines[i++]);
+      i++;
+      out.push(`<pre><code>${esc(body.join("\n"))}</code></pre>`);
+      continue;
+    }
+    const heading = trimmed.match(/^(#{1,6})\s+(.*?)\s*#*$/);
+    if (heading) {
+      const level = Math.min(4, Math.max(2, heading[1].length));
+      out.push({ heading: level, html: `<h${level}>${mdInline(heading[2])}</h${level}>` });
+      i++; continue;
+    }
+    if (/^([-*_])(\s*\1){2,}$/.test(trimmed)) { out.push("<hr>"); i++; continue; }
+    if (isTable(i)) {
+      const cells = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+      const head = cells(lines[i]);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(cells(lines[i++]));
+      const body = rows.filter((r) => r.some((c) => c)).map((r) => `<tr>${head.map((_, c) => `<td>${mdInline(r[c] || "")}</td>`).join("")}</tr>`).join("");
+      out.push(`<div class="tbl"><table><thead><tr>${head.map((h) => `<th>${mdInline(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`);
+      continue;
+    }
+    if (trimmed.startsWith(">")) {
+      const quote = [];
+      while (i < lines.length && lines[i].trim().startsWith(">")) quote.push(lines[i++].trim().replace(/^>\s?/, ""));
+      const text = quote.filter((q) => q.trim()).map(mdInline).join("<br>");
+      if (text) out.push(`<blockquote>${text}</blockquote>`);
+      continue;
+    }
+    if (LIST.test(line)) { const [html, next] = renderList(i); if (html.replace(/<\/?(ul|ol)>/g, "")) out.push(html); i = next; continue; }
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !LIST.test(lines[i]) && !/^\s*(#|>|```|\|)/.test(lines[i])) para.push(lines[i++].trim());
+    if (para.length) out.push(`<p>${para.map(mdInline).join("<br>")}</p>`); else i++;
+  }
+
+  // Sections with nothing in them keep their heading and show a quiet dash.
+  let html = "";
+  out.forEach((block, index) => {
+    if (typeof block === "object") {
+      html += block.html;
+      const next = out[index + 1];
+      const empty = next === undefined || next === "<hr>" || (typeof next === "object" && next.heading <= block.heading);
+      if (empty) html += '<p class="blank">—</p>';
+    } else html += block;
+  });
+  return html;
+}
+
 /* ================================================================ state */
 
 let state = { recording: null, jobs: {} };
@@ -229,6 +369,8 @@ let detail = null;
 let tab = saved.get("tab", "summary");
 let health = null;
 let jobSignature = "";
+let templateData = { default: "", templates: [] };
+let page = null;  // null (home or a session) | "templates" | {edit: name|null}
 
 /* ================================================================ list */
 
@@ -274,6 +416,7 @@ $("homeLink").addEventListener("click", (e) => { e.preventDefault(); select(null
 
 async function select(id, { keepScroll = false } = {}) {
   if (id !== selected) closeMenu();
+  page = null;
   selected = id; saved.set("selected", id); renderList();
   if (!id) { detail = null; render(); return; }
   try { detail = await api("sessions/" + encodeURIComponent(id)); }
@@ -341,7 +484,7 @@ async function startRecording() {
   if ($("startBtn").disabled || state.recording) return;
   const done = busy($("startBtn"), T.starting);
   try {
-    state = await api("record/start", { method: "POST", body: { mic_only: !$("withRemote").checked } });
+    state = await api("record/start", { method: "POST", body: { mic_only: !$("withRemote").checked, template: $("templateSelect").value || null } });
     $("liveTitle").value = ""; delete $("liveTitle").dataset.dirty;
     renderRecorder();
     await refreshList();
@@ -397,7 +540,10 @@ function issueDetail(issue) {
 
 function render(opts = {}) {
   const main = $("main"), scroll = main.scrollTop;
-  if (!detail) renderHome(); else renderSession(opts);
+  if (page === "templates") renderTemplates();
+  else if (page && typeof page === "object") renderTemplateEditor(page.edit);
+  else if (!detail) renderHome();
+  else renderSession(opts);
   if (opts.keepScroll) main.scrollTop = scroll;
   else if (opts.newSession) main.scrollTop = 0;
   updateTopbarRule();
@@ -473,6 +619,9 @@ function renderSession(opts) {
     .map((r) => `<span class="who ${r}">${esc(d.labels[r] || T[r])}</span>`);
   const meta = [...people];
   if (d.llm_model && d.summary) meta.push(`<span class="sep"></span><span>${esc(T.summarizedWith(d.llm_model))}</span>`);
+  if (d.tracks.length) {
+    meta.push(`<span class="sep"></span><button class="tpl-chip" type="button" data-act="tplmenu" ${locked ? "disabled" : ""}>${icon("template")}${esc(d.template || templateData.default || T.templateLabel)}${icon("chevron")}</button>`);
+  }
 
   let status = "";
   if (working) status = progressHtml(job);
@@ -484,7 +633,7 @@ function renderSession(opts) {
 
   let body = "";
   if (tab === "summary") {
-    body = d.summary ? renderSummary(d.summary, d.id)
+    body = d.summary ? (isCustomTemplate(d.template) ? `<div class="md">${renderMarkdown(d.summary, d.id)}</div>` : renderSummary(d.summary, d.id))
       : working ? "" : `<p class="empty-doc">${esc(d.status === "empty" ? T.noSpeech : T.noSummary)}</p>`;
   } else {
     body = d.segments.length
@@ -536,6 +685,130 @@ function bindTitle(d) {
 function updateTopbarRule() { $("topbar").classList.toggle("scrolled", $("main").scrollTop > 4); }
 $("main").addEventListener("scroll", updateTopbarRule, { passive: true });
 
+/* ================================================================ templates */
+
+const builtinName = () => (templateData.templates.find((t) => t.builtin) || {}).name;
+const isCustomTemplate = (name) => !!name && name !== builtinName() && templateData.templates.some((t) => t.name === name && !t.builtin);
+
+async function loadTemplates() {
+  try { templateData = await api("templates"); } catch { return; }
+  const select = $("templateSelect");
+  select.innerHTML = templateData.templates.map((t) => `<option value="${esc(t.name)}">${esc(t.name)}</option>`).join("");
+  select.value = templateData.default;
+}
+$("templateSelect").addEventListener("change", async () => {
+  try { templateData = await api(`templates/${encodeURIComponent($("templateSelect").value)}/default`, { method: "POST" }); }
+  catch (e) { toast(e.message, true); }
+});
+$("templatesBtn").title = T.templatesTip;
+$("templatesBtn").setAttribute("aria-label", T.templatesTip);
+$("templatesBtn").addEventListener("click", () => openTemplates());
+
+function openTemplates() {
+  closeMenu(); stopAudio();
+  page = "templates"; selected = null; detail = null; saved.set("selected", null);
+  renderList(); render({ newSession: true });
+}
+
+function sectionsOf(body) {
+  const found = [];
+  let code = false;
+  for (const line of body.split("\n")) {
+    if (line.trim().startsWith("```")) { code = !code; continue; }
+    const m = !code && line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+    if (m) found.push([m[1].length, m[2]]);
+  }
+  return found;
+}
+
+function renderTemplates() {
+  $("topbar").innerHTML = `<div class="crumbs"><b>${esc(T.templates)}</b></div>`;
+  $("player").hidden = true;
+  $("view").className = "doc";
+  const rows = templateData.templates.map((t) => {
+    const isDefault = t.name === templateData.default;
+    const desc = t.builtin ? T.builtinDesc : `${T.sectionsN(t.sections.length)} · ${t.sections.slice(0, 4).join(" · ")}${t.sections.length > 4 ? " …" : ""}`;
+    return `<li class="tpl-row"><div><div class="n">${esc(t.name)}${isDefault ? `<span class="badge">${esc(T.isDefault)}</span>` : ""}${t.builtin ? `<span class="badge">${esc(T.builtin)}</span>` : ""}</div><div class="d">${esc(desc)}</div></div>
+      <div class="acts">
+        ${isDefault ? "" : `<button class="tb-btn" type="button" data-tpl-default="${esc(t.name)}">${esc(T.makeDefault)}</button>`}
+        ${t.builtin ? "" : `<button class="tb-btn" type="button" data-tpl-edit="${esc(t.name)}">${esc(T.edit)}</button>
+        <button class="tb-btn icon" type="button" data-tpl-delete="${esc(t.name)}" aria-label="${esc(T.del)}">${icon("trash")}</button>`}
+      </div></li>`;
+  }).join("");
+  $("view").innerHTML = `
+    <h1 class="title">${esc(T.templates)}</h1>
+    <p class="lede-sm">${esc(T.tplLede)}</p>
+    <button class="btn solid" type="button" data-tpl-new>${icon("plus")}${esc(T.newTemplate)}</button>
+    <ul class="tpl-list">${rows}</ul>`;
+}
+
+function renderTemplateEditor(name) {
+  const existing = templateData.templates.find((t) => t.name === name);
+  $("topbar").innerHTML = `<div class="crumbs"><b>${esc(T.templates)}</b> · ${esc(name || T.newTemplate)}</div>`;
+  $("player").hidden = true;
+  $("view").className = "doc wide";
+  $("view").innerHTML = `
+    <h1 class="title">${esc(name || T.newTemplate)}</h1>
+    <div class="editor">
+      <div>
+        <label class="field"><span>${esc(T.tplName)}</span><input id="tplName" maxlength="60" placeholder="${esc(T.tplNamePh)}" value="${esc(name || "")}"></label>
+        <label class="field"><span>${esc(T.tplBody)}</span><textarea id="tplBody" spellcheck="false" placeholder="${esc(T.tplBodyPh)}">${esc(existing ? existing.body : "")}</textarea></label>
+        <div class="form-actions">
+          <button class="btn solid" type="button" id="tplSave">${esc(T.save)}</button>
+          <button class="btn" type="button" id="tplCancel">${esc(T.cancel)}</button>
+        </div>
+      </div>
+      <aside class="outline"><h4>${esc(T.outline)}</h4><ol id="tplOutline"></ol><p class="hint">${T.tplHint}</p></aside>
+    </div>`;
+  const updateOutline = () => {
+    const sections = sectionsOf($("tplBody").value);
+    const top = Math.min(...sections.map(([l]) => l));
+    $("tplOutline").innerHTML = sections.length
+      ? sections.map(([level, text]) => `<li class="l${Math.min(4, level - top + 2)}">${esc(text)}</li>`).join("")
+      : `<li class="none">${esc(T.noSections)}</li>`;
+  };
+  $("tplBody").addEventListener("input", updateOutline);
+  updateOutline();
+  $("tplCancel").addEventListener("click", () => { page = "templates"; render(); });
+  $("tplSave").addEventListener("click", async () => {
+    const newName = $("tplName").value.trim();
+    try {
+      templateData = await api(`templates/${encodeURIComponent(newName)}`, { method: "PUT", body: { body: $("tplBody").value, previous: name } });
+      await loadTemplates();
+      toast(T.tplSaved); page = "templates"; render();
+    } catch (e) { toast(e.message, true); }
+  });
+  (name ? $("tplBody") : $("tplName")).focus();
+}
+
+$("view").addEventListener("click", async (e) => {
+  const target = e.target.closest("[data-tpl-new],[data-tpl-edit],[data-tpl-default],[data-tpl-delete]");
+  if (!target) return;
+  try {
+    if (target.hasAttribute("data-tpl-new")) { page = { edit: null }; render({ newSession: true }); }
+    else if (target.dataset.tplEdit) { page = { edit: target.dataset.tplEdit }; render({ newSession: true }); }
+    else if (target.dataset.tplDefault) { templateData = await api(`templates/${encodeURIComponent(target.dataset.tplDefault)}/default`, { method: "POST" }); await loadTemplates(); render(); }
+    else if (target.dataset.tplDelete) {
+      if (!(await confirmDialog(T.tplDelTitle, T.tplDelBody, T.confirmDel))) return;
+      templateData = await api(`templates/${encodeURIComponent(target.dataset.tplDelete)}`, { method: "DELETE" });
+      await loadTemplates(); toast(T.tplDeleted); render();
+    }
+  } catch (err) { toast(err.message, true); }
+});
+
+function openTemplateMenu() {
+  const menu = $("menu"), anchor = $("view").querySelector('[data-act="tplmenu"]');
+  if (!menu.hidden) { closeMenu(); return; }
+  const current = detail.template || templateData.default;
+  menu.innerHTML = `<div class="label">${esc(T.summarizeWith)}</div>` +
+    templateData.templates.map((t) => `<button type="button" data-template="${esc(t.name)}">${icon("template")}${esc(t.name)}${t.name === current ? `<svg class="check"><use href="#i-check"/></svg>` : ""}</button>`).join("") +
+    `<hr><button type="button" data-template-manage>${icon("text")}${esc(T.manageTemplates)}</button>`;
+  menu.hidden = false;
+  const r = anchor.getBoundingClientRect();
+  menu.style.top = `${r.bottom + 6}px`;
+  menu.style.left = `${Math.min(window.innerWidth - menu.offsetWidth - 8, r.left)}px`;
+}
+
 /* ================================================================ actions */
 
 let menuLocked = false;
@@ -548,6 +821,7 @@ async function act(name) {
     if (name === "copy") { await copyText(d.summary); toast(T.copied); }
     else if (name === "export") exportMarkdown(d);
     else if (name === "menu") openMenu();
+    else if (name === "tplmenu") openTemplateMenu();
     else if (name === "resummarize") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "summarize" } }); render({ keepScroll: true }); refreshList(); }
     else if (name === "retry") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "all" } }); render({ keepScroll: true }); refreshList(); }
     else if (name === "delete") {
@@ -596,7 +870,18 @@ function openMenu() {
   if (first) first.focus();
 }
 function closeMenu() { $("menu").hidden = true; }
-$("menu").addEventListener("click", (e) => {
+$("menu").addEventListener("click", async (e) => {
+  if (e.target.closest("[data-template-manage]")) { openTemplates(); return; }
+  const choice = e.target.closest("[data-template]");
+  if (choice && detail) {
+    closeMenu();
+    const step = detail.segments.length ? "summarize" : "all";
+    try {
+      detail = await api(`sessions/${encodeURIComponent(detail.id)}/process`, { method: "POST", body: { step, template: choice.dataset.template } });
+      tab = "summary"; saved.set("tab", tab); render({ keepScroll: true }); refreshList();
+    } catch (err) { toast(err.message, true); }
+    return;
+  }
   const item = e.target.closest("[data-menu]");
   if (!item || item.disabled) return;
   closeMenu(); act(item.dataset.menu);
@@ -736,7 +1021,7 @@ async function importFile(file) {
   if (!file) return;
   toast(T.uploading);
   try {
-    const result = await api("import", { method: "POST", body: file, headers: { "X-Filename": encodeURIComponent(file.name), "Content-Type": "application/octet-stream" } });
+    const result = await api("import", { method: "POST", body: file, headers: { "X-Filename": encodeURIComponent(file.name), "X-Template": encodeURIComponent($("templateSelect").value || ""), "Content-Type": "application/octet-stream" } });
     toast(T.imported);
     await refreshList(); select(result.session_id);
   } catch (e) { toast(e.message, true); }
@@ -789,7 +1074,7 @@ async function poll() {
       const finished = jobs.filter((j) => j.stage === "done" && !jobSignature.includes(`"${j.session_id}","done"`));
       jobSignature = signature;
       await refreshList();
-      if (selected) {
+      if (selected && !page) {
         try { detail = await api("sessions/" + encodeURIComponent(selected)); render({ keepScroll: true }); } catch { /* deleted elsewhere */ }
       }
       if (finished.length && document.hidden && "Notification" in window && Notification.permission === "granted") {
@@ -803,9 +1088,10 @@ async function poll() {
 }
 
 (async function init() {
+  await loadTemplates();
   await refreshList();
   if (selected && !sessions.some((s) => s.id === selected)) selected = null;
-  await select(selected);
+  if (!page) await select(selected);  // the user may already have opened another page
   checkHealth();
   poll();
   if ("Notification" in window && Notification.permission === "default") {

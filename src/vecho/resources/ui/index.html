@@ -24,6 +24,9 @@
   <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5 20.5 19h-17z"/><path d="M12 10v4m0 2.6v.1"/></symbol>
   <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" class="fill"/></symbol>
   <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5.5h2.6v13H8zM13.4 5.5H16v13h-2.6z" class="fill"/></symbol>
+  <symbol id="i-template" viewBox="0 0 24 24"><rect x="4.5" y="4.5" width="15" height="15" rx="2"/><path d="M4.5 9.5h15M9.5 9.5v10"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7.5 10 4.5 4.5 4.5-4.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13"/></symbol>
   <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5" class="fill"/></symbol>
 </svg>
 
@@ -34,6 +37,7 @@
         <svg viewBox="0 0 24 24" class="mark" aria-hidden="true"><circle cx="12" cy="12" r="2.4" class="dot"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4"/><path d="M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14" class="outer"/></svg>
         <span>vecho</span>
       </a>
+      <button class="icon-btn" id="templatesBtn" type="button"><svg><use href="#i-template"/></svg></button>
       <button class="icon-btn" id="importBtn" type="button" data-tip-key="importTip"><svg><use href="#i-import"/></svg></button>
       <input type="file" id="fileInput" hidden accept="audio/*,video/mp4,video/webm,.m4a,.mp3,.wav,.flac,.ogg,.opus,.webm,.mp4">
     </header>
@@ -49,6 +53,10 @@
           <input type="checkbox" id="withRemote" checked>
           <span class="track" aria-hidden="true"><span class="thumb"></span></span>
           <span data-i18n="withRemote"></span>
+        </label>
+        <label class="picker">
+          <span data-i18n="templateLabel"></span>
+          <span class="picker-box"><select id="templateSelect"></select><svg><use href="#i-chevron"/></svg></span>
         </label>
       </div>
 
