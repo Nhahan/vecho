@@ -11,7 +11,13 @@ import pytest
 from vecho import transcript
 from vecho.errors import SummarizationError
 from vecho.session import SessionStore
-from vecho.summarize import OllamaClient, strip_reasoning, summarize_lines, summarize_session
+from vecho.summarize import (
+    OllamaClient,
+    build_template,
+    strip_reasoning,
+    summarize_lines,
+    summarize_session,
+)
 from vecho.transcript import Segment
 
 
@@ -195,3 +201,18 @@ def test_summarize_session_requires_transcript(tmp_path, config, ollama):
     session = SessionStore(tmp_path).create("x")
     with pytest.raises(SummarizationError, match="vecho transcribe"):
         summarize_session(session, config, client_for(ollama))
+
+
+def test_korean_template_spells_out_headings():
+    template = build_template("Korean")
+    for heading in ("한 줄 요약", "핵심 내용", "결정 사항", "액션 아이템", "미해결 질문"):
+        assert f"## {heading}" in template
+    assert '"없음"' in template
+    assert "translating" not in template
+
+
+def test_other_languages_get_english_headings_and_translation_request():
+    template = build_template("Japanese")
+    assert "## Action items" in template
+    assert "translating the headings" in template and "Japanese" in template
+    assert "do not add a second" in template

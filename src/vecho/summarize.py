@@ -39,23 +39,48 @@ Reply with concise bullet points and nothing else.
 Transcript part:
 {text}"""
 
-FINAL_TEMPLATE = """\
-Use exactly these Markdown sections, with the headings translated into {language}:
+# Section headings and the "nothing" word per language. Models often ignore an instruction to
+# translate headings, so known languages get them spelled out; others fall back to English
+# headings plus a translation request.
+_ENGLISH = ("TL;DR", "Key points", "Decisions", "Action items", "Open questions", "None")
+LOCALIZED_HEADINGS = {
+    "korean": ("한 줄 요약", "핵심 내용", "결정 사항", "액션 아이템", "미해결 질문", "없음"),
+}
 
-## TL;DR
+FINAL_TEMPLATE = """\
+Use exactly these Markdown sections in this order{translate_note}:
+
+## {tldr}
 One or two sentences.
 
-## Key points
+## {key_points}
 Bullets covering the main topics and what was said about each.
 
-## Decisions
-Bullets for decisions that were made. Write "None" if there were none.
+## {decisions}
+Bullets for decisions that were made. Write "{none}" if there were none.
 
-## Action items
-Bullets formatted as "- [ ] task — owner (deadline if mentioned)". Write "None" if there were none.
+## {actions}
+One line per item in the form "- [ ] task — owner (deadline if mentioned)"; do not add a second
+bullet marker. Write "{none}" if there were none.
 
-## Open questions
-Bullets for unresolved questions or risks. Write "None" if there were none."""
+## {questions}
+Bullets for unresolved questions or risks. Write "{none}" if there were none."""
+
+
+def build_template(language: str) -> str:
+    headings = LOCALIZED_HEADINGS.get(language.strip().lower())
+    tldr, key_points, decisions, actions, questions, none = headings or _ENGLISH
+    note = "" if headings else f', translating the headings and the word "None" into {language}'
+    return FINAL_TEMPLATE.format(
+        translate_note=note,
+        tldr=tldr,
+        key_points=key_points,
+        decisions=decisions,
+        actions=actions,
+        questions=questions,
+        none=none,
+    )
+
 
 FINAL_FROM_TRANSCRIPT = """\
 Summarize the conversation below.
@@ -83,7 +108,13 @@ def strip_reasoning(text: str) -> str:
 
 
 class OllamaClient:
-    def __init__(self, host: str, model: str, num_ctx: int = 8192, timeout: float = 600.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        model: str,
+        num_ctx: int = Config.llm_num_ctx,
+        timeout: float = Config.llm_timeout,
+    ) -> None:
         self.host = host.rstrip("/")
         self.model = model
         self.num_ctx = num_ctx
@@ -170,7 +201,7 @@ def summarize_lines(
         raise SummarizationError("the transcript is empty; there is nothing to summarize")
 
     system = SYSTEM_PROMPT.format(language=language)
-    template = FINAL_TEMPLATE.format(language=language)
+    template = build_template(language)
     chunks = transcript.split_into_chunks(lines, chunk_chars)
 
     if len(chunks) == 1:
