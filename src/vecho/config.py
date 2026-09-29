@@ -24,10 +24,10 @@ class Config:
     language: str | None = None
     # Summarization (Ollama).
     llm_host: str = "http://127.0.0.1:11434"
-    llm_model: str = "qwen3:8b"
-    llm_num_ctx: int = 8192
-    llm_timeout: float = 600.0
-    chunk_chars: int = 6000
+    llm_model: str = "qwen3.8:27b"
+    llm_num_ctx: int = 32768
+    llm_timeout: float = 1800.0
+    chunk_chars: int = 16000
     summary_language: str = "Korean"
     # Recording and transcript labels.
     sample_rate: int = 16000

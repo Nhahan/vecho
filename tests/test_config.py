@@ -86,3 +86,16 @@ def test_label_for_roles():
 
 def test_home_expands_user():
     assert load_config({"VECHO_HOME": "~/somewhere"}).home == Path.home() / "somewhere"
+
+
+def test_default_chunk_fits_the_context_window():
+    config = Config()
+    assert config.chunk_chars * 2 <= config.llm_num_ctx  # leaves room for prompt and answer
+
+
+def test_ollama_client_defaults_follow_config():
+    from vecho.summarize import OllamaClient
+
+    client = OllamaClient("http://x", "m")
+    assert client.num_ctx == Config().llm_num_ctx
+    assert client.timeout == Config().llm_timeout

@@ -28,7 +28,7 @@ uv sync                         # 의존성 설치 (.venv 생성)
 
 brew install ollama
 ollama serve &                  # 또는 Ollama 앱 실행
-ollama pull qwen3:8b            # 기본 요약 모델
+ollama pull qwen3.8:27b         # 기본 요약 모델 (약 18GB, 메모리 32GB 이상 권장)
 
 brew install --cask blackhole-2ch
 ```
@@ -98,7 +98,7 @@ vecho summarize --llm-model gemma3:12b --summary-language English
 # ~/.vecho/config.toml
 whisper_model = "large-v3-turbo"   # tiny / base / small / medium / large-v3 ...
 language = "ko"                    # 생략하면 자동 감지
-llm_model = "qwen3:8b"
+llm_model = "qwen3.8:27b"
 summary_language = "Korean"
 me_label = "나"
 remote_label = "상대방"
@@ -110,14 +110,18 @@ remote_label = "상대방"
 | `whisper_compute_type` | `VECHO_WHISPER_COMPUTE_TYPE` | `int8` |
 | `language` | `VECHO_LANGUAGE` | 자동 감지 |
 | `llm_host` | `VECHO_LLM_HOST` | `http://127.0.0.1:11434` |
-| `llm_model` | `VECHO_LLM_MODEL` | `qwen3:8b` |
-| `llm_num_ctx` | `VECHO_LLM_NUM_CTX` | `8192` |
-| `llm_timeout` | `VECHO_LLM_TIMEOUT` | `600` (초) |
-| `chunk_chars` | `VECHO_CHUNK_CHARS` | `6000` |
+| `llm_model` | `VECHO_LLM_MODEL` | `qwen3.8:27b` |
+| `llm_num_ctx` | `VECHO_LLM_NUM_CTX` | `32768` |
+| `llm_timeout` | `VECHO_LLM_TIMEOUT` | `1800` (초) |
+| `chunk_chars` | `VECHO_CHUNK_CHARS` | `16000` |
 | `summary_language` | `VECHO_SUMMARY_LANGUAGE` | `Korean` |
 | `sample_rate` | `VECHO_SAMPLE_RATE` | `16000` |
 | `me_label` / `remote_label` | `VECHO_ME_LABEL` / `VECHO_REMOTE_LABEL` | `나` / `상대방` |
 | — | `VECHO_HOME` | `~/.vecho` |
+
+> 기본값은 메모리가 넉넉한 Mac(예: 64GB 이상)을 기준으로 잡았습니다. 메모리가 작다면
+> `VECHO_LLM_MODEL=qwen3:8b VECHO_LLM_NUM_CTX=8192 VECHO_CHUNK_CHARS=6000`처럼 낮추세요.
+> `chunk_chars`는 `llm_num_ctx`의 절반 이하(한국어 기준 토큰 ≈ 글자 수)로 유지해야 잘리지 않습니다.
 
 긴 대화는 `chunk_chars` 단위로 나누어 부분 노트를 만든 뒤 하나의 요약으로 합칩니다(map-reduce).
 그래서 컨텍스트 창보다 긴 회의도 요약할 수 있습니다.
