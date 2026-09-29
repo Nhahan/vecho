@@ -1,57 +1,77 @@
 # vecho
 
-양방향 음성 대화(화상회의, 통화, 인터뷰 등)를 **내 컴퓨터에서만** 녹음하고, 전사하고, 요약하는 CLI 서비스입니다.
-녹음 · 음성 인식 · 요약이 모두 로컬에서 실행되므로 오디오와 대화 내용이 외부 서버로 나가지 않습니다.
-(최초 실행 시 모델 파일을 내려받을 때만 네트워크를 사용합니다.)
+양방향 음성 대화(화상회의, 통화, 인터뷰 등)를 **내 컴퓨터에서만** 녹음하고, 글로 옮기고, 요약하는 앱입니다.
+macOS · Windows · Linux에서 같은 화면으로 동작합니다. 녹음 · 음성 인식 · 요약이 모두 로컬에서 실행되므로
+음성과 대화 내용이 외부로 나가지 않습니다. (처음 한 번 모델 파일을 내려받을 때만 네트워크를 씁니다.)
 
 ```
-마이크 ("나") ──────────┐                               ┌─ transcript.md
+마이크 ("나") ──────────┐                               ┌─ 대화 (대본 형식)
                        ├─ 트랙별 WAV ─ faster-whisper ─┤
-시스템 오디오 ("상대방") ┘   (me / remote)   (STT, 로컬) └─ summary.md ← Ollama (LLM, 로컬)
+시스템 오디오 ("상대방") ┘   (me / remote)   (STT, 로컬) └─ 요약 카드 ← Ollama (LLM, 로컬)
 ```
 
-내 목소리(마이크)와 상대방 목소리(시스템 출력)를 **별도 트랙**으로 녹음하기 때문에, 화자 분리 모델 없이도
-`나: …` / `상대방: …` 형태로 정확하게 화자가 구분됩니다.
+내 목소리(마이크)와 상대방 목소리(컴퓨터에서 재생되는 소리)를 **별도 트랙**으로 녹음하기 때문에,
+화자 분리 모델 없이도 `나` / `상대방`이 정확히 구분됩니다.
 
-## 요구 사항
+![요약 화면](docs/summary.png)
 
-- macOS 14.4 이상 (Apple Silicon 권장)
-- Python 3.11 – 3.13, [uv](https://docs.astral.sh/uv/)
-- [Ollama](https://ollama.com) — 요약용 로컬 LLM
-- Xcode Command Line Tools (`xcode-select --install`) — 첫 실행 때 시스템 오디오 캡처 헬퍼(Swift)를 한 번 컴파일합니다
+## 사용법
 
-**가상 오디오 드라이버(BlackHole 등)나 관리자 권한, 소리 설정 변경은 필요 없습니다.**
+```bash
+vecho app
+```
+
+앱 창(또는 기본 브라우저)이 열립니다.
+
+1. **녹음 시작** — 제목은 선택입니다. 통화·회의 전에 빨간 버튼을 누르세요.
+2. **대화** — Discord, Zoom, Meet, 전화 앱 등 무엇이든 됩니다. 녹음 중에는 내 목소리와 상대방 소리가 각각 파형으로 표시되고, 제목도 이때 입력할 수 있습니다.
+3. **중지하고 요약하기** — 자동으로 글로 옮기고 한 줄 요약 · 핵심 내용 · 결정 사항 · 액션 아이템(체크 가능) · 미해결 질문으로 정리합니다.
+
+그 밖에 할 수 있는 것:
+
+- 왼쪽 목록에서 지난 대화를 **검색**하고 다시 보기
+- **대화** 탭: 누가 언제 무슨 말을 했는지 대본처럼 보기. 시간을 누르면 그 부분부터 **재생** (1–2배속)
+- 제목을 눌러 **이름 바꾸기**(녹음 중에도 가능), 요약 **복사**, Markdown으로 **내보내기**, `⋯` 메뉴에서 **다시 요약**·**삭제**
+- 액션 아이템은 **체크**할 수 있고, 담당자와 기한이 따로 정리됩니다
+- 음성 파일(mp3, m4a, wav …)을 창에 **끌어다 놓으면** 바로 요약
+- 오른쪽 위 **준비 상태**: 마이크 · 상대방 소리 · 음성 인식 · 요약 AI 점검과 해결 방법
+- 단축키: `R` 녹음/중지 · `/` 검색 · `Space` 재생/정지
+
+![대화 화면 — 재생 중인 발언이 강조되고, 타임라인에 화자별 발언 구간이 표시됩니다](docs/transcript.png)
+
+화면은 시스템 언어(한국어/영어)와 다크 모드를 따르고, 좁은 창에서도 쓸 수 있습니다.
+글꼴은 [Pretendard](https://github.com/orioncactus/pretendard)(SIL OFL 1.1)를 앱에 포함해 어느 OS에서나 같은 모양으로 보입니다.
+같은 기능을 터미널에서 쓰려면 아래 [명령어](#명령어)를 보세요.
 
 ## 설치
 
+공통: Python 3.11 – 3.13, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com)
+
 ```bash
 git clone https://github.com/Nhahan/vecho.git && cd vecho
-uv tool install --editable .           # 어디서나 `vecho` 명령 사용
-
-brew install ollama
-brew services start ollama             # 로그인 시 자동 실행
-ollama pull qwen3.8:27b                # 기본 요약 모델 (약 17GB, 메모리 32GB 이상 권장)
-
-vecho doctor                           # 환경 점검
+uv tool install --python 3.12 --editable ".[desktop]"   # `vecho` 설치 (desktop: 전용 창, 빼면 브라우저)
+ollama pull qwen3.8:27b                   # 기본 요약 모델 (약 17GB, 메모리 32GB 이상 권장)
+vecho app
 ```
 
-### 상대방 소리 캡처 (설정 없음)
+메모리가 적다면 더 작은 모델을 쓰세요: `ollama pull qwen3:8b` 후 `VECHO_LLM_MODEL=qwen3:8b` ([설정](#설정)).
 
-Discord · Zoom · Meet · FaceTime · 카카오톡 등 **Mac에서 재생되는 모든 앱의 소리**를 상대방 트랙으로 녹음합니다.
-macOS의 Core Audio 프로세스 탭을 사용하므로 다음이 모두 성립합니다.
+### 상대방 소리는 어떻게 녹음되나요?
 
-- 가상 오디오 장치를 설치하지 않고, 사운드 설정 목록에 아무것도 추가되지 않습니다.
-- **소리 출력 장치를 바꾸지 않습니다.** 내가 듣는 소리에는 아무 영향이 없고 볼륨 키도 그대로 동작합니다.
-- 스피커, AirPods, USB 헤드셋, 모니터 어느 것으로 듣든, 통화 중에 바꿔도 끊김 없이 녹음됩니다.
-- 앱이 특정 출력 장치로 고정돼 있어도 녹음됩니다.
+**가상 오디오 드라이버, 관리자 권한, 소리 설정 변경이 필요 없습니다.** 컴퓨터에서 재생되는 소리를 그대로 녹음하므로
+스피커·이어폰·헤드셋 어느 것으로 듣든, 통화 중에 바꿔도 계속 녹음되고 내가 듣는 소리에는 영향이 없습니다.
 
-처음 녹음할 때 macOS가 터미널 앱의 **시스템 오디오 녹음** 권한을 묻습니다. 허용하세요.
-상대방 트랙이 무음이라고 경고가 나오면 시스템 설정 → 개인정보 보호 및 보안 →
-**화면 및 시스템 오디오 녹음**에서 사용 중인 터미널 앱을 켜고, 재생 중인 소리가 있는지 확인하세요.
+| OS | 방식 | 필요한 것 |
+| --- | --- | --- |
+| macOS 14.4+ | Core Audio 프로세스 탭 | Xcode Command Line Tools (`xcode-select --install`, 첫 녹음 때 캡처 도우미를 한 번 컴파일). 처음 녹음할 때 **시스템 오디오 녹음** 권한을 허용 |
+| Windows 10/11 | WASAPI 루프백 | 없음 |
+| Linux | PulseAudio / PipeWire 모니터 | `pipewire-pulse` 또는 PulseAudio (대부분의 데스크톱 배포판에 기본 포함) |
 
-> 헤드폰을 쓰면 가장 깨끗합니다. 스피커로 들으면 상대방 소리가 마이크에 다시 들어가지만,
-> 깨끗한 시스템 오디오 트랙과 비교해 **마이크 쪽 에코는 전사 단계에서 자동으로 제거**됩니다
-> (6글자 미만의 짧은 맞장구는 구분이 어려워 그대로 둡니다).
+상대방 소리가 녹음되지 않았다면 앱이 종료 직후 원인과 해결 방법을 알려줍니다. (macOS에서는 대개
+시스템 설정 → 개인정보 보호 및 보안 → **화면 및 시스템 오디오 녹음**에서 앱/터미널을 허용하면 해결됩니다.)
+
+> 이어폰을 쓰면 가장 깨끗합니다. 스피커로 들으면 상대방 소리가 마이크에 다시 들어가지만,
+> **마이크 쪽 에코는 자동으로 제거**됩니다 (6글자 미만의 짧은 맞장구는 구분이 어려워 그대로 둡니다).
 
 <details>
 <summary>macOS 14.4 미만 (BlackHole 사용)</summary>
@@ -63,37 +83,34 @@ brew install --cask blackhole-2ch switchaudio-osx   # BlackHole 설치는 관리
 sudo killall coreaudiod                             # 드라이버 로드 (재부팅해도 됨)
 ```
 
-`vecho record`가 BlackHole을 자동으로 찾아, 녹음하는 동안에만 현재 출력 장치와 BlackHole로 동시에 내보내는
-`vecho Multi-Output`을 만들어 선택하고 종료하면 원래 출력으로 되돌립니다(통화 중 출력이 바뀌면 따라갑니다).
-`--no-routing`으로 자동 전환을 끌 수 있고, `vecho setup [--remove]`로 장치를 미리 만들거나 지울 수 있습니다.
-이 방식에서는 앱의 출력 장치가 **기본값**이어야 하며, 특정 장치로 고정된 앱은 녹음되지 않습니다.
+녹음하는 동안에만 현재 출력 장치와 BlackHole로 동시에 내보내는 `vecho Multi-Output`을 만들어 선택하고,
+종료하면 원래 출력으로 되돌립니다(통화 중 출력이 바뀌면 따라갑니다). `vecho record --no-routing`으로
+자동 전환을 끌 수 있고, `vecho setup [--remove]`로 장치를 미리 만들거나 지울 수 있습니다.
+이 방식에서는 앱의 출력 장치가 **기본값**이어야 합니다.
 
 </details>
 
-## 빠른 시작
+### 저장 위치와 개인정보
 
-```bash
-vecho record --title "주간 회의" --language ko
-# ● REC 00:12:41  나 ████░░░░  상대방 ██░░░░░░     ← Ctrl+C 로 종료
-```
-
-종료하면 자동으로 전사 → 요약까지 진행하고 요약을 출력합니다. 결과는 `~/.vecho/sessions/<세션>/`에 저장됩니다.
+모든 데이터는 `~/.vecho/sessions/<날짜-제목>/`에 저장됩니다 (Windows: `C:\Users\<이름>\.vecho`).
 
 | 파일 | 내용 |
 | --- | --- |
 | `me.wav`, `remote.wav` | 트랙별 원본 녹음 (16 kHz, mono) |
 | `transcript.md` / `transcript.json` | 타임스탬프와 화자가 붙은 전사문 |
-| `summary.md` | TL;DR · 핵심 내용 · 결정 사항 · 액션 아이템 · 미해결 질문 |
-| `session.json` | 제목, 시간, 사용한 모델 등 메타데이터 |
+| `summary.md` | 요약 |
+| `session.json` | 제목, 시간, 사용한 모델, 녹음 중 생긴 문제 |
 
-전사나 요약이 실패해도(예: Ollama 미실행) **녹음은 항상 보존**되며, 안내되는 명령으로 다시 시도할 수 있습니다.
+앱은 `127.0.0.1`에서만 열리고, 실행할 때마다 바뀌는 접근 토큰이 있어 다른 웹사이트가 녹음을 조작할 수 없습니다.
+전사나 요약이 실패해도 **녹음은 항상 보존**되며, 앱에서 **다시 시도**를 누르면 됩니다.
 
 ## 명령어
 
 | 명령 | 설명 |
 | --- | --- |
+| `vecho app` | 앱 열기 (`--browser` 브라우저로, `--no-open` 서버만, `--port`) |
 | `vecho setup` | (구형 macOS·BlackHole 전용) Multi-Output 장치 미리 만들기 / `--remove` 삭제 |
-| `vecho record` | 마이크 + 시스템 오디오 녹음 후 전사·요약 (`--no-process`로 녹음만) |
+| `vecho record` | 터미널에서 녹음, Ctrl+C로 종료하면 전사·요약 (`--no-process`로 녹음만) |
 | `vecho import --me a.wav --remote b.wav` | 이미 있는 오디오 파일로 세션 생성 (`--mixed`는 한 파일에 양쪽이 섞인 경우) |
 | `vecho transcribe [세션]` | 전사만 다시 실행 |
 | `vecho summarize [세션]` | 요약만 다시 실행 (모델/언어를 바꿔 재요약 가능) |
@@ -108,7 +125,7 @@ vecho record --title "주간 회의" --language ko
 
 ```bash
 vecho record --mic "MacBook"                     # 마이크를 이름 일부 또는 번호로 지정
-vecho record --remote blackhole                   # 시스템 오디오 대신 루프백 장치 사용
+vecho record --remote blackhole                   # 시스템 오디오 대신 특정 입력 장치 사용
 vecho record --mic-only                           # 상대방 소리 없이 마이크만 녹음
 vecho record --model small --language ko          # 더 가벼운 Whisper 모델
 vecho summarize --llm-model gemma3:12b --summary-language English
