@@ -1,0 +1,197 @@
+"""Summarizer tests run against a real local HTTP server that mimics Ollama's API."""
+
+from __future__ import annotations
+
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import pytest
+
+from vecho import transcript
+from vecho.errors import SummarizationError
+from vecho.session import SessionStore
+from vecho.summarize import OllamaClient, strip_reasoning, summarize_lines, summarize_session
+from vecho.transcript import Segment
+
+
+class FakeOllama:
+    def __init__(self):
+        self.requests: list[dict] = []
+        self.replies: list[str] = ["FINAL SUMMARY"]
+        self.status = 200
+        self.error_body = {"error": "boom"}
+        self.models = ["qwen3:8b", "llama3:latest"]
+        self.raw_reply: dict | None = None  # sent verbatim instead of a normal answer
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, status, payload):
+                body = json.dumps(payload).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self._send(200, {"models": [{"name": name} for name in outer.models]})
+
+            def do_POST(self):
+                length = int(self.headers["Content-Length"])
+                outer.requests.append(json.loads(self.rfile.read(length)))
+                if outer.status != 200:
+                    self._send(outer.status, outer.error_body)
+                    return
+                if outer.raw_reply is not None:
+                    self._send(200, outer.raw_reply)
+                    return
+                index = min(len(outer.requests), len(outer.replies)) - 1
+                self._send(200, {"message": {"role": "assistant", "content": outer.replies[index]}})
+
+        self.server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    @property
+    def host(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_port}"
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+@pytest.fixture
+def ollama():
+    with FakeOllama() as server:
+        yield server
+
+
+def client_for(server, **kwargs):
+    return OllamaClient(server.host, "qwen3:8b", **kwargs)
+
+
+def test_strip_reasoning():
+    assert strip_reasoning("<think>hmm\nmore</think>\n\nAnswer") == "Answer"
+    assert strip_reasoning("plain") == "plain"
+
+
+def test_chat_sends_context_window_and_disables_thinking(ollama):
+    ollama.replies = ["<think>x</think>Hello"]
+    result = client_for(ollama, num_ctx=4096).chat("sys", "user")
+    assert result == "Hello"
+    request = ollama.requests[0]
+    assert request["model"] == "qwen3:8b"
+    assert request["stream"] is False and request["think"] is False
+    assert request["options"]["num_ctx"] == 4096
+    assert [m["role"] for m in request["messages"]] == ["system", "user"]
+
+
+def test_single_chunk_makes_one_call(ollama):
+    progress = []
+    result = summarize_lines(
+        ["[00:00:01] 나: hi"],
+        client_for(ollama),
+        "Korean",
+        1000,
+        on_progress=lambda *a: progress.append(a),
+    )
+    assert result == "FINAL SUMMARY"
+    assert len(ollama.requests) == 1
+    prompt = ollama.requests[0]["messages"][1]["content"]
+    assert "[00:00:01] 나: hi" in prompt
+    assert "Korean" in ollama.requests[0]["messages"][0]["content"]
+    assert progress == [("summary", 1, 1)]
+
+
+def test_long_transcript_uses_map_reduce(ollama):
+    ollama.replies = ["notes A", "notes B", "notes C", "MERGED"]
+    lines = ["x" * 40, "y" * 40, "z" * 40]
+    progress = []
+    result = summarize_lines(
+        lines, client_for(ollama), "English", 50, on_progress=lambda *a: progress.append(a)
+    )
+    assert result == "MERGED"
+    assert len(ollama.requests) == 4
+    assert "part 1 of 3" in ollama.requests[0]["messages"][1]["content"]
+    final_prompt = ollama.requests[3]["messages"][1]["content"]
+    assert "notes A" in final_prompt and "notes C" in final_prompt
+    assert [p[0] for p in progress] == ["notes", "notes", "notes", "summary"]
+
+
+def test_empty_transcript_is_rejected_without_calling_the_model(ollama):
+    with pytest.raises(SummarizationError, match="empty"):
+        summarize_lines(["", "  "], client_for(ollama), "Korean", 100)
+    assert ollama.requests == []
+
+
+def test_missing_model_gives_pull_hint(ollama):
+    ollama.status = 404
+    ollama.error_body = {"error": "model 'qwen3:8b' not found"}
+    with pytest.raises(SummarizationError, match="ollama pull qwen3:8b"):
+        client_for(ollama).chat("s", "u")
+
+
+def test_server_error_is_surfaced(ollama):
+    ollama.status = 500
+    with pytest.raises(SummarizationError, match="HTTP 500: boom"):
+        client_for(ollama).chat("s", "u")
+
+
+def test_unreachable_server_suggests_ollama_serve():
+    client = OllamaClient("http://127.0.0.1:9", "m", timeout=2)
+    with pytest.raises(SummarizationError, match="ollama serve"):
+        client.chat("s", "u")
+
+
+@pytest.mark.parametrize("payload", [{"message": {"content": None}}, {"message": {}}, {}])
+def test_malformed_reply_is_reported(ollama, payload):
+    ollama.raw_reply = payload
+    with pytest.raises(SummarizationError):
+        client_for(ollama).chat("s", "u")
+
+
+def test_blank_answer_is_rejected(ollama):
+    ollama.raw_reply = {"message": {"content": "   "}}
+    with pytest.raises(SummarizationError, match="empty answer"):
+        client_for(ollama).chat("s", "u")
+
+
+def test_has_model_matches_implicit_latest(ollama):
+    assert client_for(ollama).has_model()
+    ollama.models = ["llama3:latest"]
+    assert not client_for(ollama).has_model()
+    assert OllamaClient(ollama.host, "llama3").has_model()
+
+
+def test_summarize_session_writes_summary_and_metadata(tmp_path, config, ollama):
+    session = SessionStore(tmp_path).create("Weekly sync")
+    session.meta.duration_sec = 125
+    transcript.save_segments(
+        session.path_for("transcript.json"),
+        [Segment(0, 2, "me", "예산 얘기 해요"), Segment(3, 5, "remote", "좋아요")],
+        "ko",
+        "tiny",
+    )
+    markdown = summarize_session(session, config, client_for(ollama))
+
+    assert markdown.startswith("# Weekly sync")
+    assert "00:02:05" in markdown and "qwen3:8b" in markdown
+    assert markdown.rstrip().endswith("FINAL SUMMARY")
+    assert session.path_for("summary.md").read_text("utf-8") == markdown
+    assert session.meta.llm_model == "qwen3:8b" and session.meta.summarized_at
+    prompt = ollama.requests[0]["messages"][1]["content"]
+    assert "나: 예산 얘기 해요" in prompt and "상대방: 좋아요" in prompt
+
+
+def test_summarize_session_requires_transcript(tmp_path, config, ollama):
+    session = SessionStore(tmp_path).create("x")
+    with pytest.raises(SummarizationError, match="vecho transcribe"):
+        summarize_session(session, config, client_for(ollama))
