@@ -182,7 +182,8 @@ class OllamaClient:
             if exc.code == 404:
                 raise SummarizationError(
                     f"Ollama has no model '{self.model}' ({detail}); "
-                    f"run `ollama pull {self.model}` or choose another with --llm-model"
+                    f"run `ollama pull {self.model}`, or set another model (llm_model in "
+                    "~/.vecho/config.toml, or --llm-model on the command line)"
                 ) from exc
             raise SummarizationError(f"Ollama returned HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
@@ -251,7 +252,11 @@ def summarize_lines(
 
     system = SYSTEM_PROMPT.format(language=language)
     custom = template is not None and not template.builtin and template.body.strip()
-    chunks = transcript.split_into_chunks(lines, chunk_chars)
+    # The final prompt carries the template as well, so the transcript gets what is left of
+    # the budget (never less than a quarter of it).
+    budget = chunk_chars - (len(template.body) if custom and template is not None else 0)
+    budget = max(chunk_chars // 4, budget)
+    chunks = transcript.split_into_chunks(lines, budget)
 
     def final(text: str, from_notes: bool) -> str:
         if not custom:
@@ -279,9 +284,19 @@ def summarize_lines(
         notes.append(
             client.chat(system, CHUNK_PROMPT.format(index=number, total=len(chunks), text=chunk))
         )
+    joined = "\n\n".join(f"### Part {i}\n{note}" for i, note in enumerate(notes, start=1))
+    # Very long conversations: condense the notes again until they fit the budget.
+    rounds = 0
+    while len(joined) > budget and len(notes) > 1 and rounds < 3:
+        rounds += 1
+        groups = transcript.split_into_chunks(joined.splitlines(), budget)
+        notes = [
+            client.chat(system, CHUNK_PROMPT.format(index=i, total=len(groups), text=group))
+            for i, group in enumerate(groups, start=1)
+        ]
+        joined = "\n\n".join(f"### Part {i}\n{note}" for i, note in enumerate(notes, start=1))
     if on_progress:
         on_progress("summary", len(chunks), len(chunks))
-    joined = "\n\n".join(f"### Part {i}\n{note}" for i, note in enumerate(notes, start=1))
     return final(joined, from_notes=True)
 
 
@@ -301,6 +316,7 @@ def summarize_session(
         raise SummarizationError(
             f"session {session.id} has no transcript; run `vecho transcribe {session.id}` first"
         )
+    session.refresh()  # a rename (or template choice) made while this job waited
     client = client or OllamaClient(
         config.llm_host, config.llm_model, config.llm_num_ctx, config.llm_timeout
     )
@@ -314,6 +330,7 @@ def summarize_session(
 
     meta = session.meta
     meta.template = chosen.name
+    meta.summary_template = chosen.name  # what summary.md was actually made with
     meta.llm_model = client.model
     meta.summarized_at = now_iso()
     header = (

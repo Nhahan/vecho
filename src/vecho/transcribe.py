@@ -309,6 +309,7 @@ def transcribe_session(
     """Transcribe every track of a session and write ``transcript.json`` / ``transcript.md``."""
     if not session.meta.tracks:
         raise TranscriptionError(f"session {session.id} has no audio tracks")
+    session.refresh()  # a rename made while this job waited belongs in the transcript header
 
     transcriber = transcriber or make_transcriber(config)
     groups: list[list[Segment]] = []

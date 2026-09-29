@@ -119,10 +119,10 @@ def test_single_chunk_makes_one_call(ollama):
 
 def test_long_transcript_uses_map_reduce(ollama):
     ollama.replies = ["notes A", "notes B", "notes C", "MERGED"]
-    lines = ["x" * 40, "y" * 40, "z" * 40]
+    lines = ["x" * 70, "y" * 70, "z" * 70]
     progress = []
     result = summarize_lines(
-        lines, client_for(ollama), "English", 50, on_progress=lambda *a: progress.append(a)
+        lines, client_for(ollama), "English", 80, on_progress=lambda *a: progress.append(a)
     )
     assert result == "MERGED"
     assert len(ollama.requests) == 4
@@ -302,3 +302,21 @@ def test_a_dropped_connection_is_a_summarization_error():
     with pytest.raises(SummarizationError, match="lost the connection"):
         client.chat("s", "u")
     server.close()
+
+
+def test_notes_too_long_for_the_final_prompt_are_condensed_again(ollama):
+    long_note = "n" * 60
+    ollama.replies = [long_note, long_note, long_note, "short 1", "short 2", "FINAL"]
+    result = summarize_lines(["x" * 70, "y" * 70, "z" * 70], client_for(ollama), "English", 80)
+    assert result == "FINAL"
+    final_prompt = ollama.requests[-1]["messages"][1]["content"]
+    assert "short 1" in final_prompt and long_note not in final_prompt
+
+
+def test_a_long_template_shrinks_the_transcript_chunks(ollama):
+    from vecho.templates import Template
+
+    ollama.replies = ["notes"] * 10 + ["## A\n- x"]
+    template = Template("긴 템플릿", "## A\n" + "- 예시\n" * 20)  # ~100 chars
+    summarize_lines(["x" * 70] * 2, client_for(ollama), "Korean", 200, template=template)
+    assert "part 1 of 2" in ollama.requests[0]["messages"][1]["content"]  # 200-100 budget
