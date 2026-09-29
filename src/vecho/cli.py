@@ -13,7 +13,7 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
-from . import __version__, audio, roles, routing
+from . import __version__, audio, roles, routing, systemaudio
 from .config import Config, load_config
 from .errors import AudioError, SessionError, VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_MD, Session, SessionStore
@@ -22,14 +22,14 @@ from .transcribe import transcribe_session
 from .transcript import format_duration
 
 NO_LOOPBACK_HELP = (
-    "no loopback device found to capture the other party's audio.\n"
-    "  1. brew install --cask blackhole-2ch   (asks for your password)\n"
-    "     then `sudo killall coreaudiod` (or reboot) so that macOS loads the driver\n"
-    "  2. vecho setup                          (creates the Multi-Output device)\n"
-    "Use --mic-only to record just the microphone, or --remote to choose another device."
+    "To capture the other party on this Mac without the built-in system audio capture, use a\n"
+    "loopback device: brew install --cask blackhole-2ch (asks for your password), then\n"
+    "`sudo killall coreaudiod` or reboot. Or use --mic-only to record just the microphone."
 )
 
 _TOO_SHORT_SEC = 1.0
+
+Source = audio.InputDevice | systemaudio.SystemAudioSource
 
 
 def _eprint(*parts: object) -> None:
@@ -82,20 +82,20 @@ def _wait_for_stop(recorder: audio.Recorder, config: Config) -> None:
 def cmd_record(args: argparse.Namespace, config: Config) -> int:
     config = _overrides(config, args)
     devices = audio.list_input_devices()
-    selected = [(roles.ME, audio.resolve_device(args.mic, devices))]
+    selected: list[tuple[str, Source]] = [(roles.ME, audio.resolve_device(args.mic, devices))]
     if not args.mic_only:
-        if args.remote:
-            remote = audio.resolve_device(args.remote, devices)
-        else:
-            remote = audio.find_loopback_device(devices)
-            if remote is None:
-                raise AudioError(NO_LOOPBACK_HELP)
-        if remote.index == selected[0][1].index:
+        remote = _choose_remote(args.remote, devices, config)
+        if isinstance(remote, audio.InputDevice) and remote.index == selected[0][1].index:
             raise AudioError("the microphone and the remote source must be different devices")
         selected.append((roles.REMOTE, remote))
 
     session = SessionStore(config.sessions_dir).create(args.title or "")
-    needs_routing = not args.mic_only and selected[-1][1].is_loopback and not args.no_routing
+    needs_routing = (
+        not args.mic_only
+        and isinstance(selected[-1][1], audio.InputDevice)
+        and selected[-1][1].is_loopback
+        and not args.no_routing
+    )
     router = routing.OutputRouter(
         config.home / "output-restore.json",
         warn=lambda message: _eprint(f"warning: {message}"),
@@ -109,11 +109,11 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
     _eprint(f"Saved {format_duration(session.meta.duration_sec)} of audio.")
     for stat in stats:
         label = config.label_for(stat.role)
-        if stat.silent:
-            _eprint(
-                f"warning: the {label} track is silent; check that audio is routed to "
-                f"'{_device_name(selected, stat.role)}'."
-            )
+        source = dict(selected)[stat.role]
+        if stat.error:
+            _eprint(f"warning: the {label} track stopped early: {stat.error}")
+        elif stat.silent:
+            _eprint(f"warning: the {label} track is silent; {_silence_hint(source)}.")
         if stat.overflows:
             _eprint(f"warning: the {label} track dropped audio {stat.overflows} time(s).")
 
@@ -127,13 +127,13 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
 
 
 def _capture(
-    session: Session, selected: Sequence[tuple[str, audio.InputDevice]], config: Config
+    session: Session, selected: Sequence[tuple[str, Source]], config: Config
 ) -> list[audio.TrackStats]:
     """Record until the user stops it; the audio files are finalized even on interruption."""
     recorder = audio.Recorder(
         [
-            audio.TrackRecorder(role, device, session.path_for(f"{role}.wav"), config.sample_rate)
-            for role, device in selected
+            _make_track(role, source, session.path_for(f"{role}.wav"), config.sample_rate)
+            for role, source in selected
         ]
     )
     try:
@@ -147,8 +147,9 @@ def _capture(
         session.meta.tracks = {role: f"{role}.wav" for role, _ in selected}
         session.save()
         _eprint(f"Recording to {session.dir}")
-        for role, device in selected:
-            _eprint(f"  {config.label_for(role)}: [{device.index}] {device.name}")
+        for role, source in selected:
+            where = source.name if source.index < 0 else f"[{source.index}] {source.name}"
+            _eprint(f"  {config.label_for(role)}: {where}")
         _eprint("Press Ctrl+C to stop.")
         _wait_for_stop(recorder, config)
     except BaseException:
@@ -159,8 +160,39 @@ def _capture(
     return recorder.stop()
 
 
-def _device_name(selected: Sequence[tuple[str, audio.InputDevice]], role: str) -> str:
-    return next(device.name for r, device in selected if r == role)
+def _silence_hint(source: Source) -> str:
+    if isinstance(source, systemaudio.SystemAudioSource):
+        return source.silence_hint
+    return f"check that audio is routed to '{source.name}'"
+
+
+def _make_track(
+    role: str, source: Source, path: Path, sample_rate: int
+) -> audio.TrackRecorder | systemaudio.SystemAudioRecorder:
+    if isinstance(source, systemaudio.SystemAudioSource):
+        return systemaudio.SystemAudioRecorder(role, source, path, sample_rate)
+    return audio.TrackRecorder(role, source, path, sample_rate)
+
+
+def _choose_remote(
+    spec: str | None, devices: Sequence[audio.InputDevice], config: Config
+) -> Source:
+    """Pick how the other party is captured.
+
+    By default that is the driverless system audio tap; a loopback device (BlackHole) is the
+    fallback for macOS older than 14.4 or when the helper cannot be built. ``--remote system``
+    forces the tap and any other value selects an input device.
+    """
+    if spec is not None and spec.strip().lower() != "system":
+        return audio.resolve_device(spec, devices)
+    try:
+        return systemaudio.prepare(config.home / "bin")
+    except AudioError as exc:
+        loopback = None if spec else audio.find_loopback_device(devices)
+        if loopback is None:
+            raise AudioError(f"{exc}\n{NO_LOOPBACK_HELP}") from exc
+        _eprint(f"note: {exc}; falling back to {loopback.name}")
+        return loopback
 
 
 # ---------------------------------------------------------------------- processing
@@ -334,6 +366,9 @@ def cmd_setup(args: argparse.Namespace, config: Config) -> int:
 
 def cmd_devices(args: argparse.Namespace, config: Config) -> int:
     devices = audio.list_input_devices()
+    if systemaudio.is_supported():
+        name = systemaudio.SYSTEM_AUDIO_NAME
+        print(f"  -  {name:<36} (default for the other party; --remote system)")
     if not devices:
         print("No audio input devices found.")
         return 1
@@ -349,6 +384,32 @@ def cmd_devices(args: argparse.Namespace, config: Config) -> int:
             f"{device.default_samplerate:.0f}Hz{note}"
         )
     return 0
+
+
+def _doctor_remote(
+    report: Callable[[str, str], None], devices: Sequence[audio.InputDevice], config: Config
+) -> None:
+    """How the other party will be captured: the driverless tap, else a loopback device."""
+    loopback = audio.find_loopback_device(devices)
+    if systemaudio.is_supported():
+        try:
+            systemaudio.prepare(config.home / "bin")
+            report("OK", "system audio capture: built in (no driver or setup needed)")
+            report(
+                "INFO",
+                "if the other party's track is silent, allow your terminal in System Settings > "
+                "Privacy & Security > Screen & System Audio Recording",
+            )
+            return
+        except VechoError as exc:
+            report("WARN", f"system audio capture unavailable: {exc}")
+    else:
+        report("WARN", "system audio capture needs macOS 14.4+")
+    if loopback:
+        report("OK", f"loopback device: {loopback.name}")
+        _doctor_routing(report)
+    else:
+        report("WARN", "no way to capture the other party; only --mic-only recording will work")
 
 
 def _doctor_routing(report: Callable[[str, str], None]) -> None:
@@ -391,13 +452,7 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
             report("OK", f"microphone: {mic.name}")
         else:
             report("FAIL", "no default microphone (check macOS microphone permission)")
-        loopback = audio.find_loopback_device(devices)
-        if loopback:
-            report("OK", f"loopback device: {loopback.name}")
-        else:
-            report("WARN", "no loopback device (BlackHole); only --mic-only recording will work")
-        if loopback:
-            _doctor_routing(report)
+        _doctor_remote(report, devices, config)
 
     if importlib.util.find_spec("faster_whisper"):
         report("OK", f"faster-whisper installed (model: {config.whisper_model})")
@@ -455,12 +510,16 @@ def build_parser() -> argparse.ArgumentParser:
     record = add("record", cmd_record, "record microphone + system audio until Ctrl+C")
     record.add_argument("-t", "--title", help="session title")
     record.add_argument("--mic", help="microphone device index or name (default: system default)")
-    record.add_argument("--remote", help="loopback device index or name (default: auto-detect)")
+    record.add_argument(
+        "--remote",
+        help="how to capture the other party: 'system' (default, no driver needed) "
+        "or a loopback input device index/name such as BlackHole",
+    )
     record.add_argument("--mic-only", action="store_true", help="record only the microphone")
     record.add_argument(
         "--no-routing",
         action="store_true",
-        help="do not switch the sound output to the Multi-Output device while recording",
+        help="with a loopback device (BlackHole): do not switch the sound output while recording",
     )
     _add_pipeline_options(record)
 

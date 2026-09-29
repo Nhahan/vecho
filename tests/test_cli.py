@@ -408,3 +408,115 @@ def test_doctor_flags_a_virtual_sound_output(monkeypatch, switcher, capsys):
     switcher._current = "BlackHole 2ch"
     cli.main(["doctor"])
     assert "virtual" in capsys.readouterr().out
+
+
+# ---- driverless system audio ---------------------------------------------------------
+
+
+def fake_source(mode="loud", rate=48000):
+    import sys
+    from pathlib import Path
+
+    from vecho.systemaudio import SystemAudioSource
+
+    script = str(Path(__file__).with_name("fake_tap.py"))
+    return SystemAudioSource(command=(sys.executable, script, str(rate), mode))
+
+
+def wait_for_remote_audio(recorder, config):
+    import time
+
+    time.sleep(0.3)  # let the fake helper deliver its half second of audio
+
+
+def test_record_uses_system_audio_by_default_without_touching_the_output(
+    rig, isolated_home, switcher, multi, monkeypatch, capsys
+):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])  # no BlackHole at all
+    monkeypatch.setattr(cli.systemaudio, "prepare", lambda bin_dir: fake_source())
+
+    def speak(recorder, config):
+        rig.speak(0, 4000)
+        wait_for_remote_audio(recorder, config)
+
+    monkeypatch.setattr(cli, "_wait_for_stop", speak)
+    calls = stub_pipeline(monkeypatch)
+    assert cli.main(["record", "-t", "tap"]) == 0
+
+    (session,) = store_for(isolated_home).list()
+    assert session.meta.tracks == {"me": "me.wav", "remote": "remote.wav"}
+    with wave.open(str(session.audio_path("remote"))) as wav:
+        assert wav.getframerate() == 16000 and wav.getnframes() == 8000
+    assert switcher.calls == [] and multi.created == []  # nothing routed, nothing installed
+    assert "System audio (all apps)" in capsys.readouterr().err
+    assert calls == ["transcribe", "summarize"]
+
+
+def test_system_audio_silence_points_to_the_permission(rig, monkeypatch, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
+    monkeypatch.setattr(cli.systemaudio, "prepare", lambda bin_dir: fake_source("silent"))
+
+    def speak(recorder, config):
+        rig.speak(0, 4000)
+        wait_for_remote_audio(recorder, config)
+
+    monkeypatch.setattr(cli, "_wait_for_stop", speak)
+    assert cli.main(["record", "--no-process"]) == 0
+    err = capsys.readouterr().err
+    assert "상대방 track is silent" in err and "Screen & System Audio Recording" in err
+
+
+def test_system_audio_helper_crash_is_reported_but_audio_is_kept(
+    rig, isolated_home, monkeypatch, capsys
+):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
+    monkeypatch.setattr(cli.systemaudio, "prepare", lambda bin_dir: fake_source("crash"))
+
+    def speak(recorder, config):
+        rig.speak(0, 4000)
+        import time
+
+        time.sleep(0.5)
+
+    monkeypatch.setattr(cli, "_wait_for_stop", speak)
+    assert cli.main(["record", "--no-process"]) == 0
+    assert "stopped early: the audio device disappeared" in capsys.readouterr().err
+
+
+def test_record_falls_back_to_blackhole_when_the_tap_is_unavailable(
+    rig, switcher, multi, monkeypatch, capsys
+):
+    # (the suite-wide stub makes prepare() raise; a loopback device exists)
+    monkeypatch.setattr(cli, "_wait_for_stop", lambda r, c: rig.speak(0, 4000))
+    assert cli.main(["record", "--no-process"]) == 0
+    assert "falling back to BlackHole 2ch" in capsys.readouterr().err
+    assert multi.created == ["Speakers"]  # the old routing path
+
+
+def test_remote_system_never_falls_back(rig, monkeypatch, capsys):
+    assert cli.main(["record", "--remote", "system", "--no-process"]) == 1
+    assert "disabled in tests" in capsys.readouterr().err  # the tap's own error, not BlackHole
+
+
+def test_record_without_tap_or_loopback_explains_both(rig, monkeypatch, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
+    assert cli.main(["record"]) == 1
+    err = capsys.readouterr().err
+    assert "disabled in tests" in err and "blackhole-2ch" in err and "--mic-only" in err
+
+
+def test_devices_lists_system_audio_first(monkeypatch, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
+    assert cli.main(["devices"]) == 0
+    out = capsys.readouterr().out
+    assert out.index("System audio") < out.index("Built-in Mic")
+
+
+def test_doctor_prefers_the_builtin_capture(monkeypatch, capsys):
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
+    monkeypatch.setattr(cli.OllamaClient, "has_model", lambda self: True)
+    monkeypatch.setattr(cli.systemaudio, "prepare", lambda bin_dir: fake_source())
+    assert cli.main(["doctor"]) == 0
+    out = capsys.readouterr().out
+    assert "system audio capture: built in" in out
+    assert "BlackHole" not in out and "Multi-Output" not in out
