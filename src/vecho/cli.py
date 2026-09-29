@@ -366,7 +366,7 @@ def cmd_templates(args: argparse.Namespace, config: Config) -> int:
             kind = (
                 "built-in"
                 if template.builtin
-                else f"{len(templates.headings(template.body))} sections"
+                else f"{len(templates.top_sections(template.body))} sections"
             )
             print(f"{mark} {template.name}  ({kind})")
         print("\n* = default. Add one with: vecho templates add NAME FILE")
