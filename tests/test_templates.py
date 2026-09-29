@@ -296,3 +296,91 @@ def test_rename_keeps_the_default(tmp_path):
     store.set_default("old")
     store.save("new", "## A\n", previous="old")
     assert store.default_name() == "new" and [t.name for t in store.list()][1:] == ["new"]
+
+
+# ---- second review ------------------------------------------------------------------------
+
+
+def test_a_code_block_inside_a_summary_is_not_unwrapped():
+    answer = (
+        "## 1. 현황\n\n- 배포 스크립트 논의\n\n```\n# 배포\n./deploy.sh\n```\n\n"
+        "## 2. 숙제\n\n1. 테스트\n"
+    )
+    assert strip_fences(answer) == answer
+
+
+def test_opening_chatter_and_stray_titles_are_not_kept():
+    body = "## 1. 현황\n"
+    for answer in (
+        "다음은 요약입니다:\n\n## 1. 현황\n- 사실\n",
+        "# 회의 요약\n\n## 1. 현황\n- 사실\n",
+        "Here is the summary\n## 1. 현황\n- 사실\n",
+    ):
+        result = conform(answer, body)
+        assert result.startswith("## 1. 현황"), result
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "별도 언급 없음",
+        "구체적인 언급 없음",
+        "추가 정보 없음",
+        "No details were given",
+        "해당 없음 (언급 없음)",
+        "언급되지 않음",
+        "대화에서 언급되지 않음",
+        "명시되지 않음",
+    ],
+)
+def test_more_filler_forms(value):
+    assert drop_placeholders(f"- {value}") == ""
+
+
+@pytest.mark.parametrize("value", ["예산 문제 없음", "이견 없음", "특이사항: 서버 증설 필요"])
+def test_facts_with_similar_words_stay(value):
+    assert drop_placeholders(f"- {value}") == f"- {value}"
+
+
+def test_renaming_onto_another_template_is_refused(tmp_path):
+    store = TemplateStore(tmp_path)
+    store.save("A", "## a\n")
+    store.save("B", "## b important\n")
+    with pytest.raises(TemplateError, match="already exists"):
+        store.save("B", "## a edited\n", previous="A")
+    assert {t.name: t.body for t in store.list()[1:]} == {"A": "## a\n", "B": "## b important\n"}
+    store.save("B", "## b edited\n")  # plain overwrite of the same template still works
+
+
+def test_emoji_only_headings_keep_their_content():
+    result = conform("## 🔥\n\n- fire content\n", "## 💡\n\n## 🔥\n")
+    assert result.index("## 🔥") < result.index("fire content")
+    assert "## 💡\n\n## 🔥" in result
+
+
+def test_heading_text_ending_in_hash_is_kept():
+    assert headings("## C#\n## Title ##\n") == [(2, "C#"), (2, "Title")]
+
+
+def test_decomposed_hangul_names_match_what_people_type(tmp_path):
+    import unicodedata
+
+    store = TemplateStore(tmp_path)
+    store.save(unicodedata.normalize("NFD", "멘토링"), "## A\n")
+    assert store.get("멘토링").name == "멘토링"
+    assert [t.name for t in store.list()][1:] == ["멘토링"]
+
+
+@pytest.mark.parametrize("name", ["CON", "nul", "Com1", "LPT9.txt"])
+def test_windows_device_names_are_stored_safely(tmp_path, name):
+    store = TemplateStore(tmp_path)
+    store.save(name, "## A\n")
+    (path,) = tmp_path.glob("*.md")
+    assert path.stem.upper() not in {"CON", "NUL", "COM1", "LPT9.TXT"}
+    assert store.get(name).name == name
+
+
+@pytest.mark.parametrize("name", [".", "..", "..."])
+def test_dot_only_names_are_rejected(tmp_path, name):
+    with pytest.raises(TemplateError):
+        TemplateStore(tmp_path).save(name, "## A\n")

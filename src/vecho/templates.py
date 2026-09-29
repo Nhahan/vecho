@@ -15,6 +15,7 @@ import contextlib
 import os
 import re
 import tempfile
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,7 @@ from .errors import VechoError
 BUILTIN_NAME = "기본 요약"
 # Characters a file name cannot hold on some system; stored as %XX so any name works.
 _UNSAFE = set('\\/:*?"<>|%')
-_HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_HEADING = re.compile(r"^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$")
 _DEFAULT_FILE = ".default"
 MAX_TEMPLATE_CHARS = 20000
 
@@ -41,8 +42,9 @@ class Template:
 
 
 def _check_name(name: str) -> str:
-    name = " ".join(name.split())
-    if not name:
+    # NFC: macOS hands out decomposed Hangul (NFD) in file names and drag-and-drop
+    name = unicodedata.normalize("NFC", " ".join(name.split()))
+    if not name or not name.strip("."):
         raise TemplateError("the template needs a name")
     if len(name) > 60:
         raise TemplateError("a template name can have at most 60 characters")
@@ -53,13 +55,18 @@ def _check_name(name: str) -> str:
     return name
 
 
+_RESERVED = re.compile(r"(?:con|prn|aux|nul|com\d|lpt\d)(?:\..*)?", re.IGNORECASE)  # Windows
+
+
 def _file_name(name: str) -> str:
     encoded = "".join(f"%{ord(c):02X}" if c in _UNSAFE else c for c in name)
-    return ("%2E" + encoded[1:] if encoded.startswith(".") else encoded) + ".md"
+    if encoded.startswith(".") or _RESERVED.fullmatch(encoded):
+        encoded = f"%{ord(encoded[0]):02X}" + encoded[1:]
+    return encoded + ".md"
 
 
 def _name_of(path: Path) -> str:
-    return urllib.parse.unquote(path.stem)
+    return unicodedata.normalize("NFC", urllib.parse.unquote(path.stem))
 
 
 def write_text_atomic(path: Path, text: str) -> None:
@@ -97,7 +104,7 @@ class TemplateStore:
 
         Matching goes through the listing rather than the file system, which may ignore case.
         """
-        wanted = " ".join((name or "").split())
+        wanted = unicodedata.normalize("NFC", " ".join((name or "").split()))
         if wanted and wanted != BUILTIN_NAME:
             for template in self.list()[1:]:
                 if template.name == wanted:
@@ -114,7 +121,8 @@ class TemplateStore:
             raise TemplateError(f"a template can have at most {MAX_TEMPLATE_CHARS} characters")
         existing = {t.name.casefold(): t.name for t in self.list()[1:]}
         clash = existing.get(name.casefold())
-        if clash is not None and clash != name and clash != previous:
+        renaming = previous is not None and previous != name
+        if clash is not None and clash != previous and (clash != name or renaming):
             raise TemplateError(f"a template named '{clash}' already exists")
         if clash is None and name.casefold() == BUILTIN_NAME.casefold():
             raise TemplateError(f"'{BUILTIN_NAME}' is the built-in template; choose another name")
@@ -144,7 +152,7 @@ class TemplateStore:
 
     def set_default(self, name: str) -> str:
         template = self.get(name)
-        if template.name != " ".join(name.split()):
+        if template.name != unicodedata.normalize("NFC", " ".join(name.split())):
             raise TemplateError(f"no template named '{name}'")
         self.root.mkdir(parents=True, exist_ok=True)
         write_text_atomic(self.root / _DEFAULT_FILE, template.name)
@@ -247,13 +255,22 @@ def remove_copied(summary: str, body: str) -> str:
 
 # "Nothing to say" fillers models write even when told to leave a field empty.
 # The *whole* value must be one of these; a sentence that merely contains "없음" is content.
+_WHERE = r"(?:(?:이\s*)?(?:전사|대화|녹음|회의)\s*(?:기록|내용|중)?\s*(?:에서|에는|에|상)?\s*)?"
+_MODIFIER = r"(?:(?:해당|관련|별도|추가|구체적(?:인)?|특별한|자세한|상세|언급된)\s*)*"
 _PLACEHOLDER = re.compile(
     r"(?:없음|없다|없습니다|해당\s*없음|미정|미확인|미언급|n/?a|none|nothing|tbd|unknown|[-–—?]+)"
-    r"|(?:(?:이\s*)?(?:전사|대화|녹음|회의)\s*(?:기록|내용|중)?\s*(?:에서|에는|에|상)?\s*)?"
-    r"(?:해당\s*|관련\s*|언급된\s*)?(?:정보|내용|언급|기록|사항|자료|논의)\s*(?:이|가|은|는)?\s*"
+    + r"|"
+    + _WHERE
+    + _MODIFIER
+    + r"(?:정보|내용|언급|기록|사항|자료|논의)\s*(?:이|가|은|는)?\s*"
     r"(?:없음|없습니다|없다|없었음|없었습니다|부족|확인\s*(?:불가|되지\s*않음))"
-    r"|(?:not\s+(?:mentioned|discussed|covered|stated)|no\s+(?:information|mention|details)"
-    r"(?:\s+(?:given|provided|available))?)(?:\s+in\s+the\s+(?:transcript|conversation|recording))?",
+    + r"|"
+    + _WHERE
+    + _MODIFIER
+    + r"(?:언급|논의|명시|확인|기재|공유)\s*되지\s*(?:않음|않았음|않았습니다|않습니다|않았다)"
+    r"|(?:not\s+(?:mentioned|discussed|covered|stated|specified)|no\s+(?:information|mention|details)"
+    r"(?:\s+(?:was|were)?\s*(?:given|provided|available|mentioned))?)"
+    r"(?:\s+in\s+the\s+(?:transcript|conversation|recording))?",
     re.IGNORECASE,
 )
 _PREFIX = re.compile(r"^(\s*(?:[-*+]|\d+[.)]|>)?\s*)")
@@ -261,7 +278,12 @@ _LABEL = re.compile(r"\*\*[^*]+\*\*\s*:?\s*")
 
 
 def _is_placeholder(text: str) -> bool:
-    text = re.sub(r"\*\*|__|`", "", text).strip().strip("()[]{}（）「」.。,·:;").strip()
+    text = re.sub(r"\*\*|__|`", "", text).strip().strip("[]{}「」.。,·:;").strip()
+    # "해당 없음 (언급 없음)": a filler followed by another filler in parentheses
+    paren = re.fullmatch(r"(.*?)\s*[(（]([^()（）]*)[)）]", text)
+    if paren and paren.group(1).strip():
+        return _is_placeholder(paren.group(1)) and _is_placeholder(paren.group(2))
+    text = text.strip("()（）").strip()
     return bool(text) and len(text) <= 40 and bool(_PLACEHOLDER.fullmatch(text))
 
 
@@ -310,6 +332,26 @@ def _split_sections(markdown: str) -> tuple[list[str], list[tuple[str, list[str]
     return preamble, sections
 
 
+def _key(text: str) -> str:
+    """Heading identity: its letters and digits, or the text itself for "## 💡" and the like."""
+    return _norm(text) or text.strip()
+
+
+# An answer's opening remark, not part of the notes: "다음은 요약입니다:", "Here is the summary".
+_CHATTER = re.compile(
+    r"(?:다음은|아래는|요청하신|이\s*템플릿|템플릿에\s*맞춰|here\s+(?:is|are)|below\s+is|sure|certainly)"
+    r".*|.*[:：]\s*$",
+    re.IGNORECASE,
+)
+
+
+def _is_content(line: str) -> bool:
+    stripped = line.strip()
+    if stripped.startswith("```") or _HEADING.match(stripped):
+        return False
+    return not _CHATTER.fullmatch(stripped)
+
+
 def conform(summary: str, body: str) -> str:
     """Make the summary follow the template's sections, in the template's order.
 
@@ -323,7 +365,7 @@ def conform(summary: str, body: str) -> str:
     if not wanted:
         return summary.strip()
     top = min(level for level, _ in wanted)
-    keys = [_norm(text) for _, text in wanted]
+    keys = [_key(text) for _, text in wanted]
     preamble, sections = _split_sections(summary)
 
     own: dict[int, list[str]] = {}  # what the model wrote directly under a template heading
@@ -331,11 +373,11 @@ def conform(summary: str, body: str) -> str:
     current = -1
     for heading_line, lines in sections:
         match = _HEADING.match(heading_line)
-        key = _norm(match.group(2)) if match else ""
+        key = _key(match.group(2)) if match else ""
         # the first unused template heading with this text, looking forward first (templates
         # may repeat a sub-heading such as "### Details" under several sections)
         order = [*range(current + 1, len(keys)), *range(0, current + 1)]
-        index = next((i for i in order if keys[i] == key and i not in own), -1)
+        index = next((i for i in order if key and keys[i] == key and i not in own), -1)
         if index == -1:
             # fuzzy: a template heading contained in the model's heading or vice versa
             index = next(
@@ -362,8 +404,8 @@ def conform(summary: str, body: str) -> str:
         return lines
 
     out: list[str] = []
-    lead = trimmed([line for line in preamble if not line.strip().startswith("```")])
-    if lead:  # text the model wrote before the first template heading is kept, not lost
+    lead = trimmed([line for line in preamble if _is_content(line)])
+    if lead:  # facts the model wrote before the first template heading are kept, not lost
         out += [*lead, ""]
     for index, (level, text) in enumerate(wanted):
         content = trimmed(own.get(index, []))
@@ -380,8 +422,15 @@ def conform(summary: str, body: str) -> str:
 
 
 def strip_fences(text: str) -> str:
-    """Models sometimes wrap the answer in a ```markdown block, maybe after a short intro."""
-    match = re.search(r"```(?:markdown|md)?[ \t]*\n(.*)\n```", text, re.DOTALL)
-    if match and match.group(1).count("\n```") == 0 and headings(match.group(1)):
-        return match.group(1)
-    return text
+    """Models sometimes wrap the whole answer in a ```markdown block, maybe after a short intro.
+
+    A code block *inside* a summary is left alone: only an answer whose headings are all
+    inside one fence, with at most a line of text around it, is unwrapped.
+    """
+    match = re.search(r"(?m)^```(?:markdown|md)?[ \t]*\n(.*)\n```[ \t]*$", text, re.DOTALL)
+    if not match or "\n```" in match.group(1) or not headings(match.group(1)):
+        return text
+    outside = (text[: match.start()] + text[match.end() :]).strip()
+    if headings(outside) or outside.count("\n") > 1:
+        return text
+    return match.group(1)
