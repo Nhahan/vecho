@@ -15,6 +15,8 @@ import json
 import os
 import re
 import tempfile
+import threading
+import unicodedata
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
@@ -45,6 +47,7 @@ class SessionMeta:
     issues: list[dict[str, str]] = field(default_factory=list)  # recording problems, for the app
     template: str | None = None  # summary template chosen for this session
     offsets: dict[str, float] = field(default_factory=dict)  # track start delays, in seconds
+    summary_template: str | None = None  # template summary.md was made with
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionMeta:
@@ -56,7 +59,7 @@ class Session:
     def __init__(self, directory: Path, meta: SessionMeta) -> None:
         self.dir = directory
         self.meta = meta
-        self._saved_title = meta.title
+        self._base = asdict(meta)  # the metadata as last read or written by this object
 
     @property
     def id(self) -> str:
@@ -84,19 +87,29 @@ class Session:
         return self.path_for(SUMMARY_MD).is_file()
 
     def save(self) -> None:
-        """Write metadata atomically so a crash never leaves a truncated file.
+        """Write metadata atomically, merging with changes others made in the meantime.
 
-        Several long-lived objects hold the same session (a running recording, a processing job)
-        while the user may rename it through another. Unless *this* object changed the title,
-        the title on disk wins, so a later save cannot silently undo a rename.
+        Several objects can hold the same session at once (a running recording, a processing
+        job, the app renaming it). Only the fields *this* object changed are written; every
+        other field keeps what is on disk, so one save never undoes another's work.
         """
         path = self.path_for(META_FILE)
-        if self.meta.title == self._saved_title and path.is_file():
-            with contextlib.suppress(OSError, ValueError, AttributeError):
-                on_disk = json.loads(path.read_text("utf-8"))
-                self.meta.title = str(on_disk.get("title", self.meta.title))
-        write_atomic(path, json.dumps(asdict(self.meta), ensure_ascii=False, indent=2))
-        self._saved_title = self.meta.title
+        with _lock_for(path):
+            mine = asdict(self.meta)
+            merged = dict(mine)
+            with contextlib.suppress(OSError, ValueError, AttributeError, TypeError):
+                on_disk = asdict(SessionMeta.from_dict(json.loads(path.read_text("utf-8"))))
+                for key, value in on_disk.items():
+                    if mine.get(key) == self._base.get(key):  # unchanged here: theirs wins
+                        merged[key] = value
+            for key, value in merged.items():
+                setattr(self.meta, key, value)
+            write_atomic(path, json.dumps(merged, ensure_ascii=False, indent=2))
+            self._base = asdict(self.meta)
+
+    def refresh(self) -> None:
+        """Pick up changes others saved (e.g. a rename) without losing unsaved ones here."""
+        self.save()
 
     @classmethod
     def load(cls, directory: Path) -> Session:
@@ -109,6 +122,15 @@ class Session:
         except (OSError, ValueError, TypeError) as exc:  # includes bad UTF-8 and missing fields
             raise SessionError(f"cannot read session metadata {path}: {exc}") from exc
         return cls(directory, meta)
+
+
+_LOCKS: dict[Path, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    with _LOCKS_GUARD:
+        return _LOCKS.setdefault(path, threading.Lock())
 
 
 def write_atomic(path: Path, text: str) -> None:
@@ -127,6 +149,10 @@ def write_atomic(path: Path, text: str) -> None:
         raise
 
 
+def _nfc(text: str) -> str:
+    return unicodedata.normalize("NFC", text)
+
+
 def slugify(title: str) -> str:
     """Filesystem-safe slug that keeps Unicode letters such as Hangul."""
     slug = re.sub(r"[^\w]+", "-", title.strip().lower()).strip("-_")
@@ -142,6 +168,7 @@ class SessionStore:
         self.root = root
 
     def create(self, title: str = "", now: datetime | None = None) -> Session:
+        title = unicodedata.normalize("NFC", title)  # macOS file names arrive decomposed
         now = now or datetime.now()
         base = now.strftime("%Y%m%d-%H%M%S")
         slug = slugify(title)
@@ -178,15 +205,16 @@ class SessionStore:
 
     def resolve(self, ref: str) -> Session:
         """Find a session by ``latest``, exact id, unique prefix, or unique substring."""
+        ref = unicodedata.normalize("NFC", ref)
         sessions = self.list()
         if not sessions:
             raise SessionError(f"no sessions found in {self.root}")
         if ref in {"latest", "last"}:
             return sessions[0]
         for matcher in (
-            lambda s: s.id == ref,
-            lambda s: s.id.startswith(ref),
-            lambda s: ref in s.id,
+            lambda s: _nfc(s.id) == ref,
+            lambda s: _nfc(s.id).startswith(ref),
+            lambda s: ref in _nfc(s.id),
         ):
             matches = [s for s in sessions if matcher(s)]
             if len(matches) == 1:

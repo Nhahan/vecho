@@ -144,3 +144,37 @@ def test_concurrent_saves_never_collide(tmp_path):
         t.join()
     assert errors == [] and Session.load(session.dir).meta.title == "x"
     assert not list(session.dir.glob("*.tmp"))
+
+
+# ---- second review ----------------------------------------------------------------------
+
+
+def test_a_stale_copy_does_not_undo_any_field(tmp_path):
+    session = SessionStore(tmp_path).create("x", now=MOMENT)
+    stale = Session.load(session.dir)  # e.g. the app renaming it
+    session.meta.llm_model = "qwen"  # e.g. the job finishing a summary
+    session.meta.template = "멘토링"
+    session.save()
+    stale.meta.title = "renamed"
+    stale.save()
+    meta = Session.load(session.dir).meta
+    assert (meta.title, meta.llm_model, meta.template) == ("renamed", "qwen", "멘토링")
+    assert stale.meta.llm_model == "qwen"  # the stale object learned the other changes
+
+
+def test_refresh_picks_up_a_rename(tmp_path):
+    session = SessionStore(tmp_path).create("old", now=MOMENT)
+    other = Session.load(session.dir)
+    other.meta.title = "new"
+    other.save()
+    session.refresh()
+    assert session.meta.title == "new"
+
+
+def test_decomposed_hangul_is_found_by_what_people_type(tmp_path):
+    import unicodedata
+
+    store = SessionStore(tmp_path)
+    created = store.create(unicodedata.normalize("NFD", "주간회의"), now=MOMENT)
+    assert created.meta.title == "주간회의"  # stored composed
+    assert store.resolve("주간회의").id == created.id
