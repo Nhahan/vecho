@@ -1,4 +1,4 @@
-"""Command-line interface: ``vecho setup | record | import | transcribe | summarize | ...``."""
+"""Command-line interface: ``vecho app | record | import | transcribe | summarize | ...``."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
-from . import __version__, audio, roles, routing, systemaudio
+from . import __version__, audio, recording, roles, routing, systemaudio
 from .config import Config, load_config
 from .errors import AudioError, SessionError, VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_MD, Session, SessionStore
@@ -21,15 +21,7 @@ from .summarize import OllamaClient, summarize_session
 from .transcribe import transcribe_session
 from .transcript import format_duration
 
-NO_LOOPBACK_HELP = (
-    "To capture the other party on this Mac without the built-in system audio capture, use a\n"
-    "loopback device: brew install --cask blackhole-2ch (asks for your password), then\n"
-    "`sudo killall coreaudiod` or reboot. Or use --mic-only to record just the microphone."
-)
-
-_TOO_SHORT_SEC = 1.0
-
-Source = audio.InputDevice | systemaudio.SystemAudioSource
+NO_LOOPBACK_HELP = recording.NO_LOOPBACK_HELP
 
 
 def _eprint(*parts: object) -> None:
@@ -81,118 +73,40 @@ def _wait_for_stop(recorder: audio.Recorder, config: Config) -> None:
 
 def cmd_record(args: argparse.Namespace, config: Config) -> int:
     config = _overrides(config, args)
-    devices = audio.list_input_devices()
-    selected: list[tuple[str, Source]] = [(roles.ME, audio.resolve_device(args.mic, devices))]
-    if not args.mic_only:
-        remote = _choose_remote(args.remote, devices, config)
-        if isinstance(remote, audio.InputDevice) and remote.index == selected[0][1].index:
-            raise AudioError("the microphone and the remote source must be different devices")
-        selected.append((roles.REMOTE, remote))
-
-    session = SessionStore(config.sessions_dir).create(args.title or "")
-    needs_routing = (
-        not args.mic_only
-        and isinstance(selected[-1][1], audio.InputDevice)
-        and selected[-1][1].is_loopback
-        and not args.no_routing
-    )
-    router = routing.OutputRouter(
-        config.home / "output-restore.json",
+    live = recording.LiveRecording(
+        config,
+        title=args.title or "",
+        mic=args.mic,
+        remote=args.remote,
+        mic_only=args.mic_only,
+        routing_enabled=not args.no_routing,
         warn=lambda message: _eprint(f"warning: {message}"),
-        enabled=needs_routing,
+        note=lambda message: _eprint(f"note: {message}"),
     )
-    with router:  # the previous sound output is restored as soon as capturing ends
-        stats = _capture(session, selected, config)
+    live.start()
+    try:
+        _eprint(f"Recording to {live.session.dir}")
+        for role, source in live.sources:
+            _eprint(f"  {config.label_for(role)}: {recording.describe_source(source)}")
+        _eprint("Press Ctrl+C to stop.")
+        _wait_for_stop(live.recorder, config)
+    except BaseException:
+        # Finalize the WAV files even when interrupted before the stop handler was installed.
+        live.abort()
+        raise
+    result = live.stop()
+    session = result.session
 
-    session.meta.duration_sec = max(s.duration for s in stats)
-    session.save()
     _eprint(f"Saved {format_duration(session.meta.duration_sec)} of audio.")
-    for stat in stats:
-        label = config.label_for(stat.role)
-        source = dict(selected)[stat.role]
-        if stat.error:
-            _eprint(f"warning: the {label} track stopped early: {stat.error}")
-        elif stat.silent:
-            _eprint(f"warning: the {label} track is silent; {_silence_hint(source)}.")
-        if stat.overflows:
-            _eprint(f"warning: the {label} track dropped audio {stat.overflows} time(s).")
-
-    if session.meta.duration_sec < _TOO_SHORT_SEC:
+    for warning in result.warnings:
+        _eprint(f"warning: {warning}")
+    if result.too_short:
         _eprint("The recording is too short to process; the audio was kept.")
         return 0
     if args.no_process:
         _eprint(f"Next: vecho transcribe {session.id} && vecho summarize {session.id}")
         return 0
     return _process(session, config)
-
-
-def _capture(
-    session: Session, selected: Sequence[tuple[str, Source]], config: Config
-) -> list[audio.TrackStats]:
-    """Record until the user stops it; the audio files are finalized even on interruption."""
-    recorder = audio.Recorder(
-        [
-            _make_track(role, source, session.path_for(f"{role}.wav"), config.sample_rate)
-            for role, source in selected
-        ]
-    )
-    try:
-        recorder.start()
-    except VechoError:
-        shutil.rmtree(session.dir, ignore_errors=True)  # nothing was recorded
-        raise
-
-    try:
-        # Register the tracks first so an interrupted or failed stop still leaves a usable session.
-        session.meta.tracks = {role: f"{role}.wav" for role, _ in selected}
-        session.save()
-        _eprint(f"Recording to {session.dir}")
-        for role, source in selected:
-            where = source.name if source.index < 0 else f"[{source.index}] {source.name}"
-            _eprint(f"  {config.label_for(role)}: {where}")
-        _eprint("Press Ctrl+C to stop.")
-        _wait_for_stop(recorder, config)
-    except BaseException:
-        # Finalize the WAV files even when interrupted before the stop handler was installed.
-        with contextlib.suppress(VechoError):
-            recorder.stop()
-        raise
-    return recorder.stop()
-
-
-def _silence_hint(source: Source) -> str:
-    if isinstance(source, systemaudio.SystemAudioSource):
-        return source.silence_hint
-    return f"check that audio is routed to '{source.name}'"
-
-
-def _make_track(
-    role: str, source: Source, path: Path, sample_rate: int
-) -> audio.TrackRecorder | systemaudio.SystemAudioRecorder:
-    if isinstance(source, systemaudio.SystemAudioSource):
-        return systemaudio.SystemAudioRecorder(role, source, path, sample_rate)
-    return audio.TrackRecorder(role, source, path, sample_rate)
-
-
-def _choose_remote(
-    spec: str | None, devices: Sequence[audio.InputDevice], config: Config
-) -> Source:
-    """Pick how the other party is captured.
-
-    By default that is the driverless system audio tap; a loopback device (BlackHole) is the
-    fallback for macOS older than 14.4 or when the helper cannot be built. ``--remote system``
-    forces the tap and any other value selects an input device.
-    """
-    if spec is not None and spec.strip().lower() != "system":
-        return audio.resolve_device(spec, devices)
-    try:
-        return systemaudio.prepare(config.home / "bin")
-    except AudioError as exc:
-        loopback = None if spec else audio.find_loopback_device(devices)
-        if loopback is None:
-            raise AudioError(f"{exc}\n{NO_LOOPBACK_HELP}") from exc
-        _eprint(f"note: {exc}; falling back to {loopback.name}")
-        return loopback
 
 
 # ---------------------------------------------------------------------- processing
@@ -493,6 +407,13 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def cmd_app(args: argparse.Namespace, config: Config) -> int:
+    from . import desktop
+
+    mode = "none" if args.no_open else "browser" if args.browser else "auto"
+    return desktop.run(config, port=args.port, mode=mode)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vecho",
@@ -506,6 +427,11 @@ def build_parser() -> argparse.ArgumentParser:
         sub = commands.add_parser(name, help=help_text, description=help_text)
         sub.set_defaults(func=func)
         return sub
+
+    app = add("app", cmd_app, "open the vecho app (a window, or your web browser)")
+    app.add_argument("--port", type=int, default=0, help="port on 127.0.0.1 (default: any free)")
+    app.add_argument("--browser", action="store_true", help="use the web browser, not a window")
+    app.add_argument("--no-open", action="store_true", help="only run the server")
 
     record = add("record", cmd_record, "record microphone + system audio until Ctrl+C")
     record.add_argument("-t", "--title", help="session title")

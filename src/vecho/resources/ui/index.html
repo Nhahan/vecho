@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="vecho-token" content="__VECHO_TOKEN__">
+<meta name="color-scheme" content="light dark">
+<title>vecho</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%231b1a17'/%3E%3Ccircle cx='16' cy='16' r='3.2' fill='%23e5402b'/%3E%3Cpath d='M10.5 10.5a7.8 7.8 0 0 0 0 11M21.5 10.5a7.8 7.8 0 0 1 0 11' fill='none' stroke='%23fbfaf7' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preload" href="/assets/PretendardVariable.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
+  <symbol id="i-import" viewBox="0 0 24 24"><path d="M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5M5 14v4.5A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5V14"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8.5" y="8.5" width="11" height="11" rx="2"/><path d="M15.5 8.5V6A1.5 1.5 0 0 0 14 4.5H6A1.5 1.5 0 0 0 4.5 6v8A1.5 1.5 0 0 0 6 15.5h2.5"/></symbol>
+  <symbol id="i-export" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14"/></symbol>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="6" cy="12" r="1.1"/><circle cx="12" cy="12" r="1.1"/><circle cx="18" cy="12" r="1.1"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95M19 5v4h-4"/></symbol>
+  <symbol id="i-text" viewBox="0 0 24 24"><path d="M5 6.5h14M5 11.5h14M5 16.5h9"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V5.5A1 1 0 0 1 11 4.5h2a1 1 0 0 1 1 1V7m-7.5 0 .8 11.1A1.5 1.5 0 0 0 8.8 19.5h6.4a1.5 1.5 0 0 0 1.5-1.4L17.5 7"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5.5 12.5 4 4 9-9"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4.5 20.5 19h-17z"/><path d="M12 10v4m0 2.6v.1"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10.5-6.5z" class="fill"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5.5h2.6v13H8zM13.4 5.5H16v13h-2.6z" class="fill"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5" class="fill"/></symbol>
+</svg>
+
+<div class="app">
+  <aside class="rail">
+    <header class="rail-head">
+      <a class="wordmark" href="#" id="homeLink" aria-label="vecho">
+        <svg viewBox="0 0 24 24" class="mark" aria-hidden="true"><circle cx="12" cy="12" r="2.4" class="dot"/><path d="M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4"/><path d="M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14" class="outer"/></svg>
+        <span>vecho</span>
+      </a>
+      <button class="icon-btn" id="importBtn" type="button" data-tip-key="importTip"><svg><use href="#i-import"/></svg></button>
+      <input type="file" id="fileInput" hidden accept="audio/*,video/mp4,video/webm,.m4a,.mp3,.wav,.flac,.ogg,.opus,.webm,.mp4">
+    </header>
+
+    <section class="recorder" id="recorder" aria-live="polite">
+      <div class="rec-idle" id="idleView">
+        <button class="rec-start" id="startBtn" type="button">
+          <span class="rec-dot" aria-hidden="true"></span>
+          <span class="rec-label" data-i18n="start"></span>
+          <kbd>R</kbd>
+        </button>
+        <label class="switch">
+          <input type="checkbox" id="withRemote" checked>
+          <span class="track" aria-hidden="true"><span class="thumb"></span></span>
+          <span data-i18n="withRemote"></span>
+        </label>
+      </div>
+
+      <div class="rec-live" id="liveView" hidden>
+        <div class="live-top">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span class="live-label" data-i18n="recording"></span>
+          <span class="live-time" id="timer">0:00</span>
+        </div>
+        <input class="live-title" id="liveTitle" maxlength="120" autocomplete="off" spellcheck="false">
+        <div class="waves" id="waves"></div>
+        <p class="live-note" id="liveNote" hidden></p>
+        <button class="rec-stop" id="stopBtn" type="button">
+          <svg><use href="#i-stop"/></svg><span class="rec-label" data-i18n="stop"></span><kbd>R</kbd>
+        </button>
+      </div>
+    </section>
+
+    <div class="search">
+      <svg><use href="#i-search"/></svg>
+      <input id="search" type="search" autocomplete="off" spellcheck="false">
+      <kbd>/</kbd>
+    </div>
+
+    <nav class="list" id="list"></nav>
+
+    <button class="rail-foot" id="healthBtn" type="button">
+      <span class="status-dot" id="healthDot"></span>
+      <span id="healthText"></span>
+    </button>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="topbar" id="topbar"></div>
+    <article class="doc" id="view"></article>
+    <div class="player" id="player" hidden>
+      <button class="play" id="playBtn" type="button"><svg><use href="#i-play" id="playUse"/></svg></button>
+      <span class="clock" id="timeNow">0:00</span>
+      <div class="timeline" id="timeline" role="slider" tabindex="0" aria-valuemin="0">
+        <canvas id="timelineCanvas"></canvas>
+      </div>
+      <span class="clock" id="timeTotal">0:00</span>
+      <button class="speed" id="speedBtn" type="button">1×</button>
+      <audio id="audio" preload="metadata"></audio>
+    </div>
+  </main>
+</div>
+
+<div class="drop" id="drop" hidden><div><strong data-i18n="dropTitle"></strong><span data-i18n="dropSub"></span></div></div>
+<div class="menu" id="menu" hidden role="menu"></div>
+<dialog class="dialog" id="dialog">
+  <form method="dialog">
+    <h3 id="dialogTitle"></h3>
+    <p id="dialogBody"></p>
+    <div class="dialog-actions">
+      <button value="cancel" class="btn" id="dialogCancel" type="submit"></button>
+      <button value="ok" class="btn danger-solid" id="dialogOk" type="submit"></button>
+    </div>
+  </form>
+</dialog>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="/assets/app.js"></script>
+</body>
+</html>
