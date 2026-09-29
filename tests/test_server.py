@@ -454,3 +454,19 @@ def test_silence_is_not_summarized_and_reads_as_empty(served, monkeypatch):
     )
     assert app.processor.state(session.id).stage == jobs.DONE  # not an error
     assert not session.has_summary
+
+
+def test_a_silent_other_side_is_reported_to_the_app(served, mic, monkeypatch):
+    monkeypatch.setattr(
+        systemaudio,
+        "prepare",
+        lambda bin_dir: SystemAudioSource(command=(sys.executable, FAKE_TAP, "48000", "silent")),
+    )
+    app, client = served
+    client.call("POST", "/api/record/start", {})
+    mic()
+    time.sleep(0.3)
+    _, result, _ = client.call("POST", "/api/record/stop")
+    assert {"code": "silent", "role": "remote"}.items() <= result["issues"][0].items()
+    _, detail, _ = client.call("GET", f"/api/sessions/{result['session_id']}")
+    assert detail["issues"][0]["code"] == "silent"

@@ -169,14 +169,19 @@ class LiveRecording:
         session.meta.duration_sec = max((s.duration for s in stats), default=0.0)
         session.save()
 
-        warnings = []
+        warnings: list[str] = []
+        issues: list[dict[str, str]] = []
         sources = dict(self.sources)
         for stat in stats:
             label = self.config.label_for(stat.role)
             if stat.error:
                 warnings.append(f"the {label} track stopped early: {stat.error}")
+                issues.append({"code": "stopped", "role": stat.role, "hint": stat.error})
             elif stat.silent:
-                warnings.append(f"the {label} track is silent; {silence_hint(sources[stat.role])}.")
+                hint = silence_hint(sources[stat.role])
+                warnings.append(f"the {label} track is silent; {hint}.")
+                issues.append({"code": "silent", "role": stat.role, "hint": hint})
             if stat.overflows:
                 warnings.append(f"the {label} track dropped audio {stat.overflows} time(s).")
-        return RecordingResult(session, stats, warnings)
+                issues.append({"code": "dropped", "role": stat.role, "hint": str(stat.overflows)})
+        return RecordingResult(session, stats, warnings, issues)
