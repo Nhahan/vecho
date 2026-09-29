@@ -10,6 +10,7 @@ from __future__ import annotations
 import http.client
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -149,8 +150,13 @@ _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def strip_reasoning(text: str) -> str:
-    """Drop ``<think>`` blocks emitted by reasoning models."""
-    return _THINK_BLOCK.sub("", text).strip()
+    """Drop ``<think>`` blocks emitted by reasoning models, even a cut-off or half-tagged one."""
+    text = _THINK_BLOCK.sub("", text)
+    if "</think>" in text:  # the opening tag was left out: everything before is reasoning
+        text = text.rsplit("</think>", 1)[1]
+    if "<think>" in text:  # never closed: the answer ran out while still reasoning
+        text = text.split("<think>", 1)[0]
+    return text.strip()
 
 
 class OllamaClient:
@@ -175,8 +181,14 @@ class OllamaClient:
             method="GET" if payload is None else "POST",
         )
         try:
+            deadline = time.monotonic() + self.timeout  # for the whole answer, not each read
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read())
+                chunks = []
+                while chunk := response.read1(1 << 16):
+                    chunks.append(chunk)
+                    if time.monotonic() > deadline:
+                        raise TimeoutError
+                return json.loads(b"".join(chunks))
         except urllib.error.HTTPError as exc:
             detail = _error_detail(exc)
             if exc.code == 404:
@@ -218,9 +230,10 @@ class OllamaClient:
             content = data["message"]["content"]
         except (KeyError, TypeError) as exc:
             raise SummarizationError("Ollama response has no message content") from exc
-        if not isinstance(content, str) or not content.strip():
+        answer = strip_reasoning(content) if isinstance(content, str) else ""
+        if not answer:  # checked after the reasoning is gone: never replace a summary with nothing
             raise SummarizationError("Ollama returned an empty answer; try another model")
-        return strip_reasoning(content)
+        return answer
 
     def list_models(self) -> list[str]:
         data = self._request("/api/tags")

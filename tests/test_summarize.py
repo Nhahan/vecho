@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -320,3 +323,40 @@ def test_a_long_template_shrinks_the_transcript_chunks(ollama):
     template = Template("긴 템플릿", "## A\n" + "- 예시\n" * 20)  # ~100 chars
     summarize_lines(["x" * 70] * 2, client_for(ollama), "Korean", 200, template=template)
     assert "part 1 of 2" in ollama.requests[0]["messages"][1]["content"]  # 200-100 budget
+
+
+def test_strip_reasoning_handles_cut_off_and_half_tagged_blocks():
+    assert strip_reasoning("<think>still thinking when the answer ran out") == ""
+    assert strip_reasoning("reasoning without an opening tag</think>\nAnswer") == "Answer"
+
+
+def test_a_reasoning_only_answer_is_an_error(ollama):
+    ollama.replies = ["<think>I should summarize this.</think>"]
+    with pytest.raises(SummarizationError, match="empty answer"):
+        client_for(ollama).chat("system", "user")
+
+
+def test_the_timeout_covers_the_whole_answer():
+    """A server that keeps sending a byte now and then must not hold the job forever."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+
+    def drip():
+        conn, _ = listener.accept()
+        with conn:
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n")
+            conn.sendall(b"Content-Length: 1000\r\n\r\n")
+            with contextlib.suppress(OSError):
+                for _ in range(40):
+                    conn.sendall(b" ")
+                    time.sleep(0.1)
+
+    threading.Thread(target=drip, daemon=True).start()
+    client = OllamaClient(f"http://127.0.0.1:{listener.getsockname()[1]}", "m", timeout=0.5)
+    started = time.monotonic()
+    with pytest.raises(SummarizationError, match="did not answer"):
+        client.chat("system", "user")
+    assert time.monotonic() - started < 2
+    listener.close()
