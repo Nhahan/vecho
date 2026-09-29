@@ -31,6 +31,10 @@ class FakeStream:
     def start(self):
         self.started = True
 
+    def abort(self):
+
+        self.stop()
+
     def stop(self):
         self.stopped = True
 
@@ -189,3 +193,30 @@ def test_disk_write_failure_is_reported_on_stop(tmp_path):
     streams[0].push(np.ones((160, 1), dtype=np.int16))
     stats = track.stop()  # reported, not raised: the other tracks must still be stopped
     assert "disk full" in stats.error
+
+
+def test_a_stream_that_never_stops_cannot_hang_the_recording(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    from vecho import audio
+
+    monkeypatch.setattr(audio, "STREAM_CLOSE_TIMEOUT", 0.3)
+    forever = threading.Event()
+
+    class StuckStream(FakeStream):
+        def abort(self):
+            forever.wait()  # like Pa_StopStream waiting for a callback that never comes
+
+    def factory(device, samplerate, channels, callback):
+        return StuckStream(samplerate, channels, callback)
+
+    track = TrackRecorder("me", MIC, tmp_path / "me.wav", 16000, factory)
+    track.start()
+    track._stream.push(np.full((1600, 1), 1000, dtype=np.int16))
+    started = time.monotonic()
+    stats = track.stop()
+    assert time.monotonic() - started < 2
+    assert stats.frames == 1600  # what was recorded is saved
+    track._on_audio(np.ones((160, 1), dtype=np.int16), 160, None, None)  # late callback: ignored
+    forever.set()

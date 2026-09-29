@@ -243,3 +243,32 @@ def test_decimator_passes_through_when_no_conversion_is_needed():
 def test_decimator_holds_a_constant_level_without_a_startup_ramp():
     out = systemaudio.Decimator(3).process(np.full(4800, 16384, dtype=np.int16))
     assert set(out.tolist()) == {16384}
+
+
+def test_two_threads_building_at_once_both_get_the_helper(monkeypatch, tmp_path):
+    import threading
+
+    script = tmp_path / "swiftc"
+    script.write_text(
+        '#!/bin/sh\nsleep 0.3\nwhile [ "$1" != "-o" ]; do shift; done\n'
+        'printf "#!/bin/sh\\nexit 0\\n" > "$2"\n'
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(systemaudio.shutil, "which", lambda name: str(script))
+    results, errors = [], []
+
+    def build():
+        try:
+            results.append(systemaudio.build_helper(tmp_path / "bin"))
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=build) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and len(set(results)) == 1
+    import os
+
+    assert os.access(results[0], os.X_OK)

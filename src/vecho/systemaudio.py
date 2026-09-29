@@ -97,6 +97,9 @@ def _script_text() -> str:
     return resources.files("vecho").joinpath("resources", "system_audio.swift").read_text("utf-8")
 
 
+_BUILD_LOCK = threading.Lock()  # the app may ask for the helper from two requests at once
+
+
 def build_helper(bin_dir: Path) -> Path:
     """Compile the capture helper once; the binary is cached by source hash."""
     source = _script_text()
@@ -104,7 +107,13 @@ def build_helper(bin_dir: Path) -> Path:
     binary = bin_dir / f"vecho-system-audio-{digest}"
     if binary.is_file() and os.access(binary, os.X_OK):
         return binary
+    with _BUILD_LOCK:
+        if binary.is_file() and os.access(binary, os.X_OK):
+            return binary  # built by another thread while this one waited
+        return _build(source, binary, bin_dir)
 
+
+def _build(source: str, binary: Path, bin_dir: Path) -> Path:
     swiftc = shutil.which("swiftc")
     if swiftc is None:
         raise AudioError(
@@ -115,16 +124,23 @@ def build_helper(bin_dir: Path) -> Path:
     with tempfile.TemporaryDirectory() as tmp:
         script = Path(tmp) / "system_audio.swift"
         script.write_text(source, encoding="utf-8")
-        partial = bin_dir / f".{binary.name}.tmp"
-        proc = subprocess.run(
-            [swiftc, "-O", str(script), "-o", str(partial)],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        fd, partial_name = tempfile.mkstemp(dir=bin_dir, prefix=f".{binary.name}.", suffix=".tmp")
+        os.close(fd)
+        partial = Path(partial_name)
+        try:
+            proc = subprocess.run(
+                [swiftc, "-O", str(script), "-o", str(partial)],
+                capture_output=True,
+                text=True,
+                timeout=300,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            partial.unlink(missing_ok=True)
+            raise AudioError(f"cannot build the system audio helper: {exc}") from exc
         if proc.returncode != 0:
             partial.unlink(missing_ok=True)
             raise AudioError(f"cannot build the system audio helper: {proc.stderr.strip()[-400:]}")
+        partial.chmod(0o755)
         os.replace(partial, binary)
     for stale in bin_dir.glob("vecho-system-audio-*"):
         if stale != binary:

@@ -123,6 +123,28 @@ def _default_stream_factory(
     )
 
 
+STREAM_CLOSE_TIMEOUT = 3.0
+
+
+def _close_stream(stream: Any, name: str, timeout: float | None = None) -> None:
+    """Abort and close a PortAudio stream without ever hanging the caller.
+
+    On macOS, Pa_StopStream can block forever waiting for a callback that never comes (seen
+    when the audio system is busy re-routing). The recording must still be saved, so the
+    stream is shut down on a helper thread and abandoned if it does not finish in time.
+    abort() is used rather than stop(): it does not wait for queued buffers to drain.
+    """
+
+    def shut() -> None:
+        for name in ("abort", "close"):
+            with contextlib.suppress(Exception):  # the device may already be gone
+                getattr(stream, name)()
+
+    worker = threading.Thread(target=shut, name=f"vecho-close-{name}", daemon=True)
+    worker.start()
+    worker.join(STREAM_CLOSE_TIMEOUT if timeout is None else timeout)
+
+
 class TrackRecorder:
     """Streams one input device to a mono 16-bit WAV file.
 
@@ -150,6 +172,7 @@ class TrackRecorder:
         self._frames = 0
         self._write_error: Exception | None = None
         self._first_at: float | None = None
+        self._closed = False
         self.level = 0.0
         self.peak = 0.0
         self.overflows = 0
@@ -188,6 +211,8 @@ class TrackRecorder:
             raise AudioError(f"cannot start recording from '{self.device.name}': {exc}") from exc
 
     def _on_audio(self, indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
+        if self._closed:
+            return
         if getattr(status, "input_overflow", False):
             self.overflows += 1
         block = np.asarray(indata)
@@ -218,11 +243,10 @@ class TrackRecorder:
                 self._write_error = exc
 
     def _teardown(self) -> None:
+        self._closed = True  # a callback still arriving from here on is ignored
         stream, self._stream = self._stream, None
         if stream is not None:
-            for action in (stream.stop, stream.close):
-                with contextlib.suppress(Exception):  # the device may already be gone
-                    action()
+            _close_stream(stream, self.device.name)
         thread, self._thread = self._thread, None
         if thread is not None:
             self._queue.put(None)
