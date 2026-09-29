@@ -9,6 +9,7 @@ Two engines run the same Whisper model:
 from __future__ import annotations
 
 import importlib.util
+import math
 import platform
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -323,11 +324,15 @@ def transcribe_session(
         shift = float(session.meta.offsets.get(role, 0.0))
         groups.append(
             [
-                Segment(round(s.start + shift, 3), round(s.end + shift, 3), s.role, s.text)
+                Segment(
+                    round(max(0.0, s.start) + shift, 3),
+                    round(max(s.start, s.end, 0.0) + shift, 3),
+                    s.role,
+                    s.text,
+                )
                 for s in result.segments
+                if math.isfinite(s.start) and math.isfinite(s.end)  # a decoder glitch: no time
             ]
-            if shift
-            else result.segments
         )
         longest = max(longest, result.duration)
         if result.language and result.duration > detected[0]:
@@ -335,13 +340,12 @@ def transcribe_session(
 
     segments = transcript.remove_echo(transcript.merge_segments(*groups))
     language = config.language or detected[1]
+    # render before writing anything, so a failure leaves the previous transcript whole
+    markdown = transcript.render_markdown(session.display_title, segments, config.label_for)
     transcript.save_segments(
         session.path_for(TRANSCRIPT_JSON), segments, language, transcriber.model_name
     )
-    write_atomic(
-        session.path_for(TRANSCRIPT_MD),
-        transcript.render_markdown(session.display_title, segments, config.label_for),
-    )
+    write_atomic(session.path_for(TRANSCRIPT_MD), markdown)
 
     meta = session.meta
     meta.language = language

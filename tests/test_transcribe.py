@@ -345,3 +345,13 @@ def test_track_start_offsets_shift_the_later_track(tmp_path, config):
     model = FakeModel({"me.wav": [(1.0, 2.0, "하나")], "remote.wav": [(0.8, 1.5, "둘")]})
     segments = transcribe_session(session, config, transcriber_for(model))
     assert [(s.role, s.start) for s in segments] == [("me", 1.0), ("remote", 1.2)]
+
+
+def test_segments_without_a_real_time_are_dropped(tmp_path, config):
+    session = make_session(tmp_path, {"me": "me.wav"})
+    model = FakeModel(
+        {"me.wav": [(float("nan"), 1.0, "유령"), (2.0, float("inf"), "유령"), (3.0, 4.0, "진짜")]}
+    )
+    segments = transcribe_session(session, config, transcriber_for(model))
+    assert [s.text for s in segments] == ["진짜"]
+    json.loads(session.path_for("transcript.json").read_text("utf-8"), parse_constant=pytest.fail)

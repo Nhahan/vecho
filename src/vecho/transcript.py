@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
@@ -160,12 +161,13 @@ def save_segments(
         "model": model,
         "segments": [asdict(segment) for segment in segments],
     }
-    write_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
+    write_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False))
 
 
 def load_segments(path: Path) -> list[Segment]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return [Segment.from_dict(item) for item in data["segments"]]
+        segments = [Segment.from_dict(item) for item in data["segments"]]
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise SessionError(f"cannot read transcript {path}: {exc}") from exc
+    return [s for s in segments if math.isfinite(s.start) and math.isfinite(s.end)]
