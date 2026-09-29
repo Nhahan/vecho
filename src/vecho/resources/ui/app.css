@@ -439,11 +439,8 @@ kbd {
 
 /* ---------------------------------------------------------------- home */
 
-.home .eyebrow { font-size: 13px; color: var(--ink-3); font-weight: 550; margin: 18px 0 10px; }
-.home h1 { font-size: 40px; line-height: 1.16; letter-spacing: -0.035em; font-weight: 720; margin: 0 0 16px; word-break: keep-all; }
-.home .lede { font-size: 17px; line-height: 1.65; color: var(--ink-2); margin: 0 0 28px; max-width: 34em; word-break: keep-all; }
-.home .cta { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.home .cta .hint { font-size: 13px; color: var(--ink-3); }
+.home .cta { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 20px; }
+.home .cta + h2 { margin-top: 44px; }
 .home h2 { font-size: 13px; font-weight: 650; color: var(--ink-3); margin: 56px 0 4px; letter-spacing: -0.005em; display: flex; align-items: center; }
 .home h2 button { margin-left: auto; font-size: 12.5px; font-weight: 550; color: var(--ink-2); padding: 3px 8px; border-radius: 6px; }
 .home h2 button:hover { background: var(--hover); }
@@ -529,7 +526,6 @@ kbd {
   .doc { padding: 20px 20px 120px; }
   .topbar { padding-left: 20px; }
   .title { font-size: 26px; }
-  .home h1 { font-size: 30px; }
   .player { padding: 10px 14px; position: fixed; left: 0; right: 0; }
   .crumbs { display: none; }
 }

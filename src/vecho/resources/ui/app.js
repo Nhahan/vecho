@@ -16,10 +16,6 @@ const T = KO ? {
   st_recording: "녹음 중", st_processing: "정리 중", st_error: "실패", st_recorded: "정리 전",
   st_transcribed: "요약 전", st_empty: "말소리 없음",
   ready: "모든 준비가 끝났습니다", notReady: (n) => `${n}개 항목 확인 필요`, checking: "준비 상태 확인 중",
-  homeEyebrow: "로컬에서만 동작하는 대화 기록",
-  homeTitle: "대화에만 집중하세요.\n정리는 vecho가 합니다.",
-  homeLede: "녹음을 시작하면 내 목소리와 상대방 목소리를 따로 담고, 끝나면 이 컴퓨터 안에서 글로 옮겨 핵심 내용과 할 일을 정리합니다. 음성도, 대화 내용도 밖으로 나가지 않습니다.",
-  homeHint: "Discord, Zoom, Meet, 전화 — 어떤 앱이든 됩니다.",
   readiness: "준비 상태", recheck: "다시 확인", tips: "알아두면 좋은 것",
   tip1t: "이어폰 사용", tip1: "스피커로 들어도 되지만, 이어폰을 쓰면 내 목소리와 상대방 소리가 가장 깨끗하게 나뉩니다.",
   tip2t: "파일로 요약", tip2: "이미 녹음한 파일을 창에 끌어다 놓으면 바로 정리합니다.",
@@ -68,10 +64,6 @@ const T = KO ? {
   st_recording: "Recording", st_processing: "Working", st_error: "Failed", st_recorded: "Not processed",
   st_transcribed: "No summary", st_empty: "No speech",
   ready: "Everything is ready", notReady: (n) => `${n} item${n > 1 ? "s" : ""} need attention`, checking: "Checking readiness",
-  homeEyebrow: "Conversation notes that never leave your computer",
-  homeTitle: "Stay in the conversation.\nvecho takes the notes.",
-  homeLede: "vecho records your voice and the other side on separate tracks, then transcribes and summarizes everything on this computer — key points, decisions and to-dos. Nothing is uploaded.",
-  homeHint: "Works with Discord, Zoom, Meet, phone apps — anything.",
   readiness: "Readiness", recheck: "Check again", tips: "Good to know",
   tip1t: "Use headphones", tip1: "Speakers work too, but headphones keep your voice and theirs cleanly apart.",
   tip2t: "Summarize a file", tip2: "Drop an existing recording onto the window to summarize it.",
@@ -563,12 +555,8 @@ function renderHome() {
       </li>`).join("");
   $("view").className = "doc home";
   $("view").innerHTML = `
-    <p class="eyebrow">${esc(T.homeEyebrow)}</p>
-    <h1>${esc(T.homeTitle).replace("\n", "<br>")}</h1>
-    <p class="lede">${esc(T.homeLede)}</p>
     <div class="cta">
       <button class="btn solid big" id="homeStart" type="button"><span class="rec-dot"></span>${esc(T.start)}<kbd>R</kbd></button>
-      <span class="hint">${esc(T.homeHint)}</span>
     </div>
     <h2>${esc(T.readiness)}<button type="button" id="recheck">${esc(T.recheck)}</button></h2>
     <ul class="checks">${checks}</ul>
