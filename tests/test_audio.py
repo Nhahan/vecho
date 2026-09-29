@@ -8,16 +8,15 @@ from vecho.audio import (
     InputDevice,
     Recorder,
     TrackRecorder,
-    find_loopback_device,
     resolve_device,
 )
 from vecho.errors import AudioError
 
 MIC = InputDevice(0, "MacBook Pro Microphone", 1, 48000.0, is_default=True)
-BLACKHOLE = InputDevice(3, "BlackHole 2ch", 2, 48000.0)
+LINE_IN = InputDevice(3, "USB Audio 2ch", 2, 48000.0)
 USB = InputDevice(5, "USB Mic", 1, 44100.0)
 USB2 = InputDevice(6, "USB Mic Pro", 1, 44100.0)
-DEVICES = [MIC, BLACKHOLE, USB, USB2]
+DEVICES = [MIC, LINE_IN, USB, USB2]
 
 
 class FakeStream:
@@ -60,21 +59,15 @@ def read_wav(path):
     return params, data
 
 
-def test_loopback_detection():
-    assert BLACKHOLE.is_loopback and not MIC.is_loopback
-    assert find_loopback_device(DEVICES) is BLACKHOLE
-    assert find_loopback_device([MIC, USB]) is None
-
-
 def test_resolve_default_index_and_name():
     assert resolve_device(None, DEVICES) is MIC
-    assert resolve_device("3", DEVICES) is BLACKHOLE
-    assert resolve_device("blackhole", DEVICES) is BLACKHOLE
+    assert resolve_device("3", DEVICES) is LINE_IN
+    assert resolve_device("usb audio", DEVICES) is LINE_IN
     assert resolve_device("USB Mic", DEVICES) is USB  # exact name beats substring
 
 
 def test_resolve_falls_back_to_first_when_no_default():
-    assert resolve_device(None, [BLACKHOLE, USB]) is BLACKHOLE
+    assert resolve_device(None, [LINE_IN, USB]) is LINE_IN
 
 
 @pytest.mark.parametrize("spec", ["99", "nothing-like-this", "usb"])
@@ -111,7 +104,7 @@ def test_track_recorder_writes_mono_wav(tmp_path):
 def test_stereo_input_is_downmixed_to_mono(tmp_path):
     streams = []
     path = tmp_path / "remote.wav"
-    track = TrackRecorder("remote", BLACKHOLE, path, 16000, make_factory(streams))
+    track = TrackRecorder("remote", LINE_IN, path, 16000, make_factory(streams))
     track.start()
     assert streams[0].channels == 2
     left_right = np.column_stack([np.full(100, 1000), np.full(100, 3000)]).astype(np.int16)
@@ -158,7 +151,7 @@ def test_recorder_runs_tracks_together_and_reports_levels(tmp_path):
     recorder = Recorder(
         [
             TrackRecorder("me", MIC, tmp_path / "me.wav", 16000, factory),
-            TrackRecorder("remote", BLACKHOLE, tmp_path / "remote.wav", 16000, factory),
+            TrackRecorder("remote", LINE_IN, tmp_path / "remote.wav", 16000, factory),
         ]
     )
     recorder.start()
@@ -173,7 +166,7 @@ def test_recorder_start_failure_releases_started_tracks(tmp_path):
     streams = []
     good = TrackRecorder("me", MIC, tmp_path / "me.wav", 16000, make_factory(streams))
     bad = TrackRecorder(
-        "remote", BLACKHOLE, tmp_path / "remote.wav", 16000, make_factory([], {16000, 48000})
+        "remote", LINE_IN, tmp_path / "remote.wav", 16000, make_factory([], {16000, 48000})
     )
     with pytest.raises(AudioError):
         Recorder([good, bad]).start()

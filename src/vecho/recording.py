@@ -5,20 +5,18 @@ from __future__ import annotations
 import contextlib
 import shutil
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import audio, roles, routing, systemaudio
+from . import audio, roles, systemaudio
 from .config import Config
 from .errors import AudioError, VechoError
 from .session import Session, SessionStore
 
-NO_LOOPBACK_HELP = (
-    "To capture the other party on this Mac without the built-in system audio capture, use a\n"
-    "loopback device: brew install --cask blackhole-2ch (asks for your password), then\n"
-    "`sudo killall coreaudiod` or reboot. Or use --mic-only to record just the microphone."
+NO_SYSTEM_AUDIO_HELP = (
+    "Use --mic-only to record just the microphone, or --remote to record another input device."
 )
 
 TOO_SHORT_SEC = 1.0
@@ -27,28 +25,15 @@ Source = audio.InputDevice | systemaudio.SystemAudioSource
 Track = Any  # TrackRecorder, SystemAudioRecorder or LoopbackRecorder
 
 
-def choose_remote(
-    spec: str | None,
-    devices: Sequence[audio.InputDevice],
-    config: Config,
-    note: Callable[[str], None],
-) -> Source:
-    """Pick how the other party is captured.
-
-    By default that is the driverless system audio tap; a loopback device (BlackHole) is the
-    fallback for macOS older than 14.4 or when the helper cannot be built. ``system`` forces
-    the tap and any other value selects an input device.
-    """
+def choose_remote(spec: str | None, devices: Sequence[audio.InputDevice], config: Config) -> Source:
+    """How the other party is captured: the system audio by default (``None`` or ``system``),
+    otherwise the named input device."""
     if spec is not None and spec.strip().lower() != "system":
         return audio.resolve_device(spec, devices)
     try:
         return systemaudio.prepare(config.home / "bin")
     except AudioError as exc:
-        loopback = None if spec else audio.find_loopback_device(devices)
-        if loopback is None:
-            raise AudioError(f"{exc}\n{NO_LOOPBACK_HELP}") from exc
-        note(f"{exc}; falling back to {loopback.name}")
-        return loopback
+        raise AudioError(f"{exc}\n{NO_SYSTEM_AUDIO_HELP}") from exc
 
 
 def make_track(role: str, source: Source, path: Path, sample_rate: int) -> Track:
@@ -85,7 +70,7 @@ class RecordingResult:
 
 
 class LiveRecording:
-    """Owns the session directory, output routing and track recorders of one recording."""
+    """Owns the session directory and track recorders of one recording."""
 
     def __init__(
         self,
@@ -94,34 +79,18 @@ class LiveRecording:
         mic: str | None = None,
         remote: str | None = None,
         mic_only: bool = False,
-        routing_enabled: bool = True,
-        warn: Callable[[str], None] | None = None,
-        note: Callable[[str], None] | None = None,
     ) -> None:
         self.config = config
-        self._warn = warn or (lambda message: None)
-        note = note or (lambda message: None)
 
         devices = audio.list_input_devices()
         self.sources: list[tuple[str, Source]] = [(roles.ME, audio.resolve_device(mic, devices))]
         if not mic_only:
-            source = choose_remote(remote, devices, config, note)
+            source = choose_remote(remote, devices, config)
             if isinstance(source, audio.InputDevice) and source.index == self.sources[0][1].index:
                 raise AudioError("the microphone and the remote source must be different devices")
             self.sources.append((roles.REMOTE, source))
 
         self.session = SessionStore(config.sessions_dir).create(title)
-        last = self.sources[-1][1]
-        self._router = routing.OutputRouter(
-            config.home / "output-restore.json",
-            warn=self._warn,
-            enabled=(
-                not mic_only
-                and isinstance(last, audio.InputDevice)
-                and last.is_loopback
-                and routing_enabled
-            ),
-        )
         self.recorder = audio.Recorder(
             [
                 make_track(role, source, self.session.path_for(f"{role}.wav"), config.sample_rate)
@@ -132,11 +101,9 @@ class LiveRecording:
         self._stopped = False
 
     def start(self) -> None:
-        self._router.__enter__()
         try:
             self.recorder.start()
         except BaseException:
-            self._router.__exit__(None, None, None)
             shutil.rmtree(self.session.dir, ignore_errors=True)  # nothing was recorded
             raise
         # Register the tracks first so an interrupted or failed stop still leaves a usable session.
@@ -160,10 +127,7 @@ class LiveRecording:
         if self._stopped:
             raise AudioError("the recording was already stopped")
         self._stopped = True
-        try:
-            stats = self.recorder.stop()
-        finally:
-            self._router.__exit__(None, None, None)  # give the sound output back right away
+        stats = self.recorder.stop()
 
         session = self.session
         session.meta.duration_sec = max((s.duration for s in stats), default=0.0)

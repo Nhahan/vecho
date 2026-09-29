@@ -8,7 +8,7 @@ On macOS:
 No virtual audio device, no change to the sound output and no admin rights are involved,
 so nothing shows up in the user's sound settings. It works with any output (speakers,
 AirPods, a monitor...) and keeps working when the output changes mid-call. It needs
-macOS 14.4+; older systems fall back to a loopback device such as BlackHole.
+macOS 14.4+.
 
 A small compiled Swift helper does the capture and streams raw PCM over a pipe (see
 ``resources/system_audio.swift`` for the protocol); this module builds it on first use
@@ -60,7 +60,6 @@ class SystemAudioSource:
     backend: str = TAP
     name: str = SYSTEM_AUDIO_NAME
     index: int = -1
-    is_loopback: bool = False  # no sound-output routing is ever needed
     silence_hint: str = MAC_SILENCE_HINT
 
 
@@ -87,7 +86,7 @@ def install_hint() -> str:
     if system == "Darwin":
         if macos_version()[:2] >= MIN_MACOS:
             return "Install the Xcode command line tools: xcode-select --install"
-        return "Update to macOS 14.4 or later, or install BlackHole (see the README)."
+        return "Update to macOS 14.4 or later."
     if system == "Linux":
         return "Use PulseAudio or PipeWire (with pipewire-pulse) and install libpulse."
     return "Check that a sound output device is enabled in the sound settings."

@@ -13,15 +13,13 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
-from . import __version__, audio, recording, roles, routing, systemaudio
+from . import __version__, audio, recording, roles, systemaudio
 from .config import Config, load_config
-from .errors import AudioError, SessionError, VechoError
+from .errors import SessionError, VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_MD, Session, SessionStore
 from .summarize import OllamaClient, summarize_session
 from .transcribe import transcribe_session
 from .transcript import format_duration
-
-NO_LOOPBACK_HELP = recording.NO_LOOPBACK_HELP
 
 
 def _eprint(*parts: object) -> None:
@@ -79,9 +77,6 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
         mic=args.mic,
         remote=args.remote,
         mic_only=args.mic_only,
-        routing_enabled=not args.no_routing,
-        warn=lambda message: _eprint(f"warning: {message}"),
-        note=lambda message: _eprint(f"note: {message}"),
     )
     live.start()
     try:
@@ -247,34 +242,6 @@ def cmd_show(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- setup
-
-
-def cmd_setup(args: argparse.Namespace, config: Config) -> int:
-    """Optional: pre-build the Multi-Output device (``record`` also builds it on demand)."""
-    if args.remove:
-        removed = routing.MultiOutput().remove()
-        print(f"Removed '{routing.MULTI_OUTPUT_NAME}'." if removed else "Nothing to remove.")
-        return 0
-
-    if audio.find_loopback_device(audio.list_input_devices()) is None:
-        raise AudioError(NO_LOOPBACK_HELP)
-    switcher = routing.OutputSwitcher()
-    if not switcher.available:
-        raise AudioError(routing.SWITCH_INSTALL_HELP)
-    if routing.MULTI_OUTPUT_NAME in switcher.outputs() and not args.force:
-        print(f"'{routing.MULTI_OUTPUT_NAME}' already exists (use --force to recreate it).")
-        return 0
-
-    print(routing.MultiOutput().create(args.output))
-    if routing.MULTI_OUTPUT_NAME not in switcher.outputs():
-        raise AudioError(
-            "the device was created but macOS does not list it; try `vecho setup` again"
-        )
-    print("Ready. `vecho record` adapts it to whatever you listen on and restores the output.")
-    return 0
-
-
 # ------------------------------------------------------------------------ diagnosis
 
 
@@ -287,12 +254,7 @@ def cmd_devices(args: argparse.Namespace, config: Config) -> int:
         print("No audio input devices found.")
         return 1
     for device in devices:
-        tags = [
-            tag
-            for tag, on in (("default", device.is_default), ("loopback", device.is_loopback))
-            if on
-        ]
-        note = f"  ({', '.join(tags)})" if tags else ""
+        note = "  (default)" if device.is_default else ""
         print(
             f"{device.index:>3}  {device.name:<36} {device.channels}ch "
             f"{device.default_samplerate:.0f}Hz{note}"
@@ -300,50 +262,18 @@ def cmd_devices(args: argparse.Namespace, config: Config) -> int:
     return 0
 
 
-def _doctor_remote(
-    report: Callable[[str, str], None], devices: Sequence[audio.InputDevice], config: Config
-) -> None:
-    """How the other party will be captured: the driverless tap, else a loopback device."""
-    loopback = audio.find_loopback_device(devices)
-    if systemaudio.is_supported():
-        try:
-            systemaudio.prepare(config.home / "bin")
-            report("OK", "system audio capture: built in (no driver or setup needed)")
-            report(
-                "INFO",
-                "if the other party's track is silent, allow your terminal in System Settings > "
-                "Privacy & Security > Screen & System Audio Recording",
-            )
-            return
-        except VechoError as exc:
-            report("WARN", f"system audio capture unavailable: {exc}")
-    else:
-        report("WARN", "system audio capture needs macOS 14.4+")
-    if loopback:
-        report("OK", f"loopback device: {loopback.name}")
-        _doctor_routing(report)
-    else:
-        report("WARN", "no way to capture the other party; only --mic-only recording will work")
-
-
-def _doctor_routing(report: Callable[[str, str], None]) -> None:
-    switcher = routing.OutputSwitcher()
-    if not switcher.available:
-        report("WARN", routing.SWITCH_INSTALL_HELP)
-        return
+def _doctor_remote(report: Callable[[str, str], None], config: Config) -> None:
+    """Whether the other party (the system audio) can be captured."""
     try:
-        current = switcher.current()
+        systemaudio.prepare(config.home / "bin")
     except VechoError as exc:
-        report("WARN", str(exc))
+        report("FAIL", f"system audio capture unavailable: {exc} ({systemaudio.install_hint()})")
         return
-    if routing.is_virtual_output(current) and current != routing.MULTI_OUTPUT_NAME:
-        report("WARN", f"sound output '{current}' is virtual; pick your speakers or headphones")
-    else:
-        report("OK", f"sound output: {current} (captured automatically while recording)")
+    report("OK", "system audio capture: built in (no driver or setup needed)")
     report(
         "INFO",
-        "apps whose own output setting is fixed to one device (Discord, Zoom, ...) "
-        "must be set to 'Default' to be captured",
+        "if the other party's track is silent, allow your terminal in System Settings > "
+        "Privacy & Security > Screen & System Audio Recording",
     )
 
 
@@ -366,7 +296,7 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
             report("OK", f"microphone: {mic.name}")
         else:
             report("FAIL", "no default microphone (check macOS microphone permission)")
-        _doctor_remote(report, devices, config)
+        _doctor_remote(report, config)
 
     if importlib.util.find_spec("faster_whisper"):
         report("OK", f"faster-whisper installed (model: {config.whisper_model})")
@@ -438,15 +368,10 @@ def build_parser() -> argparse.ArgumentParser:
     record.add_argument("--mic", help="microphone device index or name (default: system default)")
     record.add_argument(
         "--remote",
-        help="how to capture the other party: 'system' (default, no driver needed) "
-        "or a loopback input device index/name such as BlackHole",
+        help="how to capture the other party: 'system' (default: everything the computer plays) "
+        "or an input device index/name",
     )
     record.add_argument("--mic-only", action="store_true", help="record only the microphone")
-    record.add_argument(
-        "--no-routing",
-        action="store_true",
-        help="with a loopback device (BlackHole): do not switch the sound output while recording",
-    )
     _add_pipeline_options(record)
 
     imp = add("import", cmd_import, "create a session from existing audio files")
@@ -471,13 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--transcript", action="store_true", help="print the transcript instead")
     show.add_argument("--path", action="store_true", help="print the session directory")
 
-    setup = add("setup", cmd_setup, "create the Multi-Output device used to capture system audio")
-    setup.add_argument("--output", help="speakers/headphones to play through (default: current)")
-    setup.add_argument("--force", action="store_true", help="recreate the device if it exists")
-    setup.add_argument("--remove", action="store_true", help="delete the device instead")
-
     add("devices", cmd_devices, "list audio input devices")
-    add("doctor", cmd_doctor, "check microphone, loopback, Whisper and Ollama")
+    add("doctor", cmd_doctor, "check microphone, system audio, Whisper and Ollama")
     return parser
 
 

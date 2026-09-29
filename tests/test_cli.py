@@ -4,14 +4,14 @@ from datetime import datetime
 import numpy as np
 import pytest
 
-from vecho import audio, cli, routing
+from vecho import audio, cli
 from vecho.audio import InputDevice
 from vecho.errors import SummarizationError, TranscriptionError
 from vecho.session import SessionStore
 from vecho.transcript import Segment, save_segments
 
 MIC = InputDevice(0, "Built-in Mic", 1, 48000.0, is_default=True)
-BLACKHOLE = InputDevice(2, "BlackHole 2ch", 2, 48000.0)
+LINE_IN = InputDevice(2, "USB Audio 2ch", 2, 48000.0)
 
 
 @pytest.fixture(autouse=True)
@@ -172,11 +172,11 @@ def test_transcribe_and_summarize_commands_target_latest(isolated_home, monkeypa
 
 
 def test_devices_lists_tags(monkeypatch, capsys):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, LINE_IN])
     assert cli.main(["devices"]) == 0
     out = capsys.readouterr().out
     assert "Built-in Mic" in out and "default" in out
-    assert "BlackHole 2ch" in out and "loopback" in out
+    assert "USB Audio 2ch" in out
 
 
 # ---- record -------------------------------------------------------------------------
@@ -219,7 +219,7 @@ class Rig:
 def rig(monkeypatch):
     rig = Rig()
     monkeypatch.setattr(audio, "_default_stream_factory", rig.factory)
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, LINE_IN])
     return rig
 
 
@@ -230,7 +230,7 @@ def test_record_saves_both_tracks(rig, isolated_home, monkeypatch, capsys):
 
     monkeypatch.setattr(cli, "_wait_for_stop", speak_then_stop)
     calls = stub_pipeline(monkeypatch)
-    assert cli.main(["record", "-t", "sync"]) == 0
+    assert cli.main(["record", "-t", "sync", "--remote", "2"]) == 0
 
     (session,) = store_for(isolated_home).list()
     assert session.meta.tracks == {"me": "me.wav", "remote": "remote.wav"}
@@ -242,25 +242,17 @@ def test_record_saves_both_tracks(rig, isolated_home, monkeypatch, capsys):
 
 def test_record_warns_about_silent_track(rig, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_wait_for_stop", lambda recorder, config: rig.speak(0, 4000))
-    assert cli.main(["record", "--no-process"]) == 0
+    assert cli.main(["record", "--no-process", "--remote", "2"]) == 0
     err = capsys.readouterr().err
-    assert "상대방 track is silent" in err and "BlackHole 2ch" in err
+    assert "상대방 track is silent" in err and "USB Audio 2ch" in err
 
 
-def test_record_mic_only_needs_no_loopback(rig, isolated_home, monkeypatch):
+def test_record_mic_only_needs_no_second_source(rig, isolated_home, monkeypatch):
     monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
     monkeypatch.setattr(cli, "_wait_for_stop", lambda recorder, config: rig.speak(0, 4000))
     assert cli.main(["record", "--mic-only", "--no-process"]) == 0
     (session,) = store_for(isolated_home).list()
     assert list(session.meta.tracks) == ["me"]
-
-
-def test_record_without_loopback_explains_setup(rig, isolated_home, monkeypatch, capsys):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
-    assert cli.main(["record"]) == 1
-    err = capsys.readouterr().err
-    assert "blackhole-2ch" in err and "--mic-only" in err
-    assert store_for(isolated_home).list() == []
 
 
 def test_record_rejects_same_device_for_both_sides(rig, isolated_home, capsys):
@@ -274,7 +266,7 @@ def test_record_cleans_up_when_device_cannot_open(rig, isolated_home, monkeypatc
         raise OSError("device busy")
 
     monkeypatch.setattr(audio, "_default_stream_factory", refuse)
-    assert cli.main(["record"]) == 1
+    assert cli.main(["record", "--remote", "2"]) == 1
     assert "device busy" in capsys.readouterr().err
     assert store_for(isolated_home).list() == []
 
@@ -309,107 +301,6 @@ def test_meter_scales_with_level():
     assert 0 < cli._meter(0.02).count("█") < 8
 
 
-# ---- output routing & setup -----------------------------------------------------------
-
-
-def test_record_follows_the_current_output_and_restores(rig, switcher, multi, monkeypatch):
-    switcher._outputs.append("AirPods")
-    switcher._current = "AirPods"  # not the speakers: whatever the user listens on
-    seen = {}
-
-    def speak(recorder, config):
-        seen["during"] = switcher.current()
-        rig.speak(0, 4000)
-        rig.speak(2, 2000)
-
-    monkeypatch.setattr(cli, "_wait_for_stop", speak)
-    stub_pipeline(monkeypatch)
-    assert cli.main(["record"]) == 0
-    assert seen["during"] == routing.MULTI_OUTPUT_NAME
-    assert multi.created == ["AirPods"]
-    assert switcher.current() == "AirPods"  # back to normal before processing starts
-
-
-def test_record_restores_output_even_when_interrupted(rig, switcher, monkeypatch):
-    def interrupted(recorder, config):
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(cli, "_wait_for_stop", interrupted)
-    assert cli.main(["record", "--no-process"]) == 130
-    assert switcher.current() == "Speakers"
-
-
-@pytest.mark.parametrize("flags", [["--no-routing"], ["--mic-only"]])
-def test_record_can_skip_routing(rig, switcher, multi, monkeypatch, flags):
-    monkeypatch.setattr(cli, "_wait_for_stop", lambda r, c: rig.speak(0, 4000))
-    assert cli.main(["record", "--no-process", *flags]) == 0
-    assert switcher.calls == [] and multi.created == []
-
-
-def test_record_warns_but_records_when_routing_is_impossible(
-    rig, switcher, multi, monkeypatch, capsys
-):
-    multi.fail = True
-    monkeypatch.setattr(cli, "_wait_for_stop", lambda r, c: rig.speak(0, 4000))
-    assert cli.main(["record", "--no-process"]) == 0
-    err = capsys.readouterr().err
-    assert "could not capture audio played through 'Speakers'" in err
-    assert "Saved" in err
-
-
-def test_setup_builds_the_device_for_the_chosen_output(monkeypatch, multi, capsys):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
-    assert cli.main(["setup", "--output", "Speakers"]) == 0
-    out = capsys.readouterr().out
-    assert multi.created == ["Speakers"] and "Ready" in out
-
-
-def test_setup_is_idempotent_unless_forced(monkeypatch, switcher, multi, capsys):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
-    switcher._outputs.append(routing.MULTI_OUTPUT_NAME)
-    assert cli.main(["setup"]) == 0
-    assert "already exists" in capsys.readouterr().out and multi.created == []
-    assert cli.main(["setup", "--force"]) == 0
-    assert len(multi.created) == 1
-
-
-def test_setup_needs_blackhole_first(monkeypatch, capsys):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
-    assert cli.main(["setup"]) == 1
-    assert "blackhole-2ch" in capsys.readouterr().err
-
-
-def test_setup_needs_the_switch_tool(monkeypatch, switcher, capsys):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
-    switcher.available = False
-    assert cli.main(["setup"]) == 1
-    assert "switchaudio-osx" in capsys.readouterr().err
-
-
-def test_setup_remove(monkeypatch, switcher, multi, capsys):
-    switcher._outputs.append(routing.MULTI_OUTPUT_NAME)
-    assert cli.main(["setup", "--remove"]) == 0
-    assert multi.removed and "Removed" in capsys.readouterr().out
-
-
-def test_doctor_reports_the_output_and_app_pinning_caveat(monkeypatch, switcher, capsys):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
-    monkeypatch.setattr(cli.OllamaClient, "has_model", lambda self: True)
-    assert cli.main(["doctor"]) == 0
-    out = capsys.readouterr().out
-    assert "sound output: Speakers" in out
-    assert "Discord" in out and "Default" in out
-
-
-def test_doctor_flags_a_virtual_sound_output(monkeypatch, switcher, capsys):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC, BLACKHOLE])
-    monkeypatch.setattr(cli.OllamaClient, "has_model", lambda self: True)
-    switcher._outputs.append("BlackHole 2ch")
-    switcher._current = "BlackHole 2ch"
-    cli.main(["doctor"])
-    assert "virtual" in capsys.readouterr().out
-
-
 # ---- driverless system audio ---------------------------------------------------------
 
 
@@ -430,9 +321,9 @@ def wait_for_remote_audio(recorder, config):
 
 
 def test_record_uses_system_audio_by_default_without_touching_the_output(
-    rig, isolated_home, switcher, multi, monkeypatch, capsys
+    rig, isolated_home, monkeypatch, capsys
 ):
-    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])  # no BlackHole at all
+    monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
     monkeypatch.setattr(cli.systemaudio, "prepare", lambda bin_dir: fake_source())
 
     def speak(recorder, config):
@@ -447,7 +338,6 @@ def test_record_uses_system_audio_by_default_without_touching_the_output(
     assert session.meta.tracks == {"me": "me.wav", "remote": "remote.wav"}
     with wave.open(str(session.audio_path("remote"))) as wav:
         assert wav.getframerate() == 16000 and wav.getnframes() == 8000
-    assert switcher.calls == [] and multi.created == []  # nothing routed, nothing installed
     assert "System audio (all apps)" in capsys.readouterr().err
     assert calls == ["transcribe", "summarize"]
 
@@ -483,26 +373,17 @@ def test_system_audio_helper_crash_is_reported_but_audio_is_kept(
     assert "stopped early: the audio device disappeared" in capsys.readouterr().err
 
 
-def test_record_falls_back_to_blackhole_when_the_tap_is_unavailable(
-    rig, switcher, multi, monkeypatch, capsys
-):
-    # (the suite-wide stub makes prepare() raise; a loopback device exists)
-    monkeypatch.setattr(cli, "_wait_for_stop", lambda r, c: rig.speak(0, 4000))
-    assert cli.main(["record", "--no-process"]) == 0
-    assert "falling back to BlackHole 2ch" in capsys.readouterr().err
-    assert multi.created == ["Speakers"]  # the old routing path
-
-
-def test_remote_system_never_falls_back(rig, monkeypatch, capsys):
+def test_remote_system_reports_the_capture_error(rig, monkeypatch, capsys):
     assert cli.main(["record", "--remote", "system", "--no-process"]) == 1
-    assert "disabled in tests" in capsys.readouterr().err  # the tap's own error, not BlackHole
+    assert "disabled in tests" in capsys.readouterr().err
 
 
-def test_record_without_tap_or_loopback_explains_both(rig, monkeypatch, capsys):
+def test_record_without_system_audio_explains_the_options(rig, isolated_home, monkeypatch, capsys):
     monkeypatch.setattr(audio, "list_input_devices", lambda: [MIC])
     assert cli.main(["record"]) == 1
     err = capsys.readouterr().err
-    assert "disabled in tests" in err and "blackhole-2ch" in err and "--mic-only" in err
+    assert "disabled in tests" in err and "--mic-only" in err and "--remote" in err
+    assert store_for(isolated_home).list() == []
 
 
 def test_devices_lists_system_audio_first(monkeypatch, capsys):

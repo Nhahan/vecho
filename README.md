@@ -73,23 +73,6 @@ vecho app
 > 이어폰을 쓰면 가장 깨끗합니다. 스피커로 들으면 상대방 소리가 마이크에 다시 들어가지만,
 > **마이크 쪽 에코는 자동으로 제거**됩니다 (6글자 미만의 짧은 맞장구는 구분이 어려워 그대로 둡니다).
 
-<details>
-<summary>macOS 14.4 미만 (BlackHole 사용)</summary>
-
-시스템 오디오 캡처를 쓸 수 없는 구형 macOS에서는 루프백 장치로 대체됩니다.
-
-```bash
-brew install --cask blackhole-2ch switchaudio-osx   # BlackHole 설치는 관리자 비밀번호 필요
-sudo killall coreaudiod                             # 드라이버 로드 (재부팅해도 됨)
-```
-
-녹음하는 동안에만 현재 출력 장치와 BlackHole로 동시에 내보내는 `vecho Multi-Output`을 만들어 선택하고,
-종료하면 원래 출력으로 되돌립니다(통화 중 출력이 바뀌면 따라갑니다). `vecho record --no-routing`으로
-자동 전환을 끌 수 있고, `vecho setup [--remove]`로 장치를 미리 만들거나 지울 수 있습니다.
-이 방식에서는 앱의 출력 장치가 **기본값**이어야 합니다.
-
-</details>
-
 ### 저장 위치와 개인정보
 
 모든 데이터는 `~/.vecho/sessions/<날짜-제목>/`에 저장됩니다 (Windows: `C:\Users\<이름>\.vecho`).
@@ -109,14 +92,13 @@ sudo killall coreaudiod                             # 드라이버 로드 (재�
 | 명령 | 설명 |
 | --- | --- |
 | `vecho app` | 앱 열기 (`--browser` 브라우저로, `--no-open` 서버만, `--port`) |
-| `vecho setup` | (구형 macOS·BlackHole 전용) Multi-Output 장치 미리 만들기 / `--remove` 삭제 |
 | `vecho record` | 터미널에서 녹음, Ctrl+C로 종료하면 전사·요약 (`--no-process`로 녹음만) |
 | `vecho import --me a.wav --remote b.wav` | 이미 있는 오디오 파일로 세션 생성 (`--mixed`는 한 파일에 양쪽이 섞인 경우) |
 | `vecho transcribe [세션]` | 전사만 다시 실행 |
 | `vecho summarize [세션]` | 요약만 다시 실행 (모델/언어를 바꿔 재요약 가능) |
 | `vecho list` | 세션 목록 |
 | `vecho show [세션]` | 요약 출력 (`--transcript` 전사문, `--path` 폴더 경로) |
-| `vecho devices` | 오디오 입력 장치 목록 (`loopback` 표시) |
+| `vecho devices` | 오디오 입력 장치 목록 |
 | `vecho doctor` | 마이크 · 시스템 오디오 캡처 · Whisper · Ollama 점검 |
 
 `[세션]`에는 전체 ID, 앞부분(prefix), 일부 문자열 또는 `latest`(기본값)를 쓸 수 있습니다.
@@ -125,7 +107,7 @@ sudo killall coreaudiod                             # 드라이버 로드 (재�
 
 ```bash
 vecho record --mic "MacBook"                     # 마이크를 이름 일부 또는 번호로 지정
-vecho record --remote blackhole                   # 시스템 오디오 대신 특정 입력 장치 사용
+vecho record --remote "USB"                       # 시스템 소리 대신 특정 입력 장치(이름 일부/번호) 녹음
 vecho record --mic-only                           # 상대방 소리 없이 마이크만 녹음
 vecho record --model small --language ko          # 더 가벼운 Whisper 모델
 vecho summarize --llm-model gemma3:12b --summary-language English

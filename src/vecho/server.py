@@ -69,7 +69,6 @@ class App:
         self._lock = threading.Lock()
         self._live: recording.LiveRecording | None = None
         self._issues: dict[str, list[dict[str, str]]] = {}
-        self._notes: list[str] = []
 
     # -- recording --------------------------------------------------------------------------
 
@@ -77,21 +76,10 @@ class App:
         with self._lock:
             if self._live is not None:
                 raise Conflict("a recording is already running")
-            notes: list[str] = []
-            issues: list[dict[str, str]] = []
-            live = recording.LiveRecording(
-                self.config,
-                title=title.strip(),
-                mic_only=mic_only,
-                warn=lambda message: issues.append(
-                    {"code": "routing", "role": "", "hint": message}
-                ),
-                note=notes.append,
-            )
+            live = recording.LiveRecording(self.config, title=title.strip(), mic_only=mic_only)
             live.start()
             self._live = live
-            self._issues[live.session.id] = issues
-            self._notes = notes
+            self._issues[live.session.id] = []
         return self.state()
 
     def stop_recording(self) -> dict[str, Any]:
@@ -137,7 +125,6 @@ class App:
                     role: {"label": self.config.label_for(role), "name": source.name}
                     for role, source in live.sources
                 },
-                "notes": self._notes,
                 "issues": self._issues.get(live.session.id, []),
             }
         return {"version": __version__, "recording": current, "jobs": self.processor.snapshot()}
@@ -319,11 +306,7 @@ class App:
             source = systemaudio.prepare(self.config.home / "bin")
             add("system_audio", True, source.name)
         except VechoError as exc:
-            loopback = audio.find_loopback_device(devices)
-            if loopback is not None:
-                add("system_audio", True, loopback.name)
-            else:
-                add("system_audio", False, str(exc), systemaudio.install_hint())
+            add("system_audio", False, str(exc), systemaudio.install_hint())
 
         whisper = importlib.util.find_spec("faster_whisper") is not None
         add(

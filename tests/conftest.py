@@ -4,24 +4,9 @@ from pathlib import Path
 
 import pytest
 
-from fakes import FakeMulti, FakeSwitcher
-from vecho import routing, systemaudio
+from vecho import systemaudio
 from vecho.config import Config
 from vecho.errors import AudioError
-
-
-@pytest.fixture(autouse=True)
-def switcher(monkeypatch) -> FakeSwitcher:
-    fake = FakeSwitcher()
-    monkeypatch.setattr(routing, "OutputSwitcher", lambda *args, **kwargs: fake)
-    return fake
-
-
-@pytest.fixture(autouse=True)
-def multi(monkeypatch, switcher) -> FakeMulti:
-    fake = FakeMulti(switcher)
-    monkeypatch.setattr(routing, "MultiOutput", lambda *args, **kwargs: fake)
-    return fake
 
 
 @pytest.fixture(autouse=True)

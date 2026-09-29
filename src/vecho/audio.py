@@ -1,9 +1,9 @@
 """Audio input: device discovery and simultaneous multi-track recording.
 
 A two-way conversation is captured as two independent mono tracks: the
-microphone (you) and a loopback device such as BlackHole that carries the
-system output (the other party). Keeping the tracks separate gives free
-speaker attribution later, without diarization.
+microphone (you) and the system audio (the other party, see
+:mod:`vecho.systemaudio`). Keeping the tracks separate gives free speaker
+attribution later, without diarization.
 """
 
 from __future__ import annotations
@@ -22,9 +22,6 @@ import numpy as np
 
 from .errors import AudioError
 
-# Virtual devices that expose system audio as an input on macOS.
-LOOPBACK_HINTS = ("blackhole", "loopback audio", "soundflower")
-
 # Normalized peak (0..1) below which a whole track is considered silent.
 SILENCE_PEAK = 0.01
 
@@ -38,11 +35,6 @@ class InputDevice:
     channels: int
     default_samplerate: float
     is_default: bool = False
-
-    @property
-    def is_loopback(self) -> bool:
-        lowered = self.name.lower()
-        return any(hint in lowered for hint in LOOPBACK_HINTS)
 
 
 def _sounddevice() -> Any:
@@ -71,10 +63,6 @@ def list_input_devices() -> list[InputDevice]:
         for index, info in enumerate(raw)
         if info["max_input_channels"] > 0
     ]
-
-
-def find_loopback_device(devices: Sequence[InputDevice]) -> InputDevice | None:
-    return next((d for d in devices if d.is_loopback), None)
 
 
 def resolve_device(spec: str | None, devices: Sequence[InputDevice]) -> InputDevice:

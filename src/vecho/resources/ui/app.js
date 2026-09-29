@@ -48,7 +48,6 @@ const T = KO ? {
   is_stopped: "녹음이 중간에 끊겼습니다", is_stopped_d: "끊기기 전까지의 녹음은 저장되어 있습니다.",
   is_dropped: "소리가 잠깐 끊긴 구간이 있습니다", is_dropped_d: "컴퓨터가 바빴을 수 있습니다.",
   is_too_short: "녹음이 너무 짧아 정리하지 않았습니다", is_too_short_d: "",
-  is_routing: "상대방 소리 녹음 설정에 문제가 있습니다", is_routing_d: "",
 } : {
   start: "New recording", stop: "Stop and summarize", recording: "Recording", withRemote: "Include the other side",
   untitled: "Untitled", untitledAt: (t) => `Conversation at ${t}`, titlePh: "Add a title", systemAudio: "System audio (all apps)", search: "Search", importTip: "Import an audio file",
@@ -90,7 +89,6 @@ const T = KO ? {
   is_stopped: "Recording stopped partway through", is_stopped_d: "Everything up to that point was saved.",
   is_dropped: "Audio briefly dropped out", is_dropped_d: "The computer may have been busy.",
   is_too_short: "Too short to process", is_too_short_d: "",
-  is_routing: "Problem setting up the other side's audio", is_routing_d: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -328,7 +326,7 @@ function renderRecorder() {
     if (waveHistory[role].length > 400) waveHistory[role].shift();
     drawWave(waves.querySelector(`canvas[data-role="${role}"]`), waveHistory[role], cssVar(role === "me" ? "--me" : "--them"));
   }
-  const notes = [...(rec.notes || []), ...(rec.issues || []).map((i) => issueTitle(i))];
+  const notes = (rec.issues || []).map((i) => issueTitle(i));
   $("liveNote").hidden = !notes.length;
   $("liveNote").textContent = notes.join(" · ");
 }
