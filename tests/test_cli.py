@@ -197,6 +197,10 @@ class Rig:
             def start(self):
                 pass
 
+            def abort(self):
+
+                self.stop()
+
             def stop(self):
                 pass
 
@@ -449,3 +453,26 @@ def test_import_and_summarize_accept_a_template(tmp_path, isolated_home, monkeyp
     assert cli.main(["summarize", "--template", "기본 요약"]) == 0
     assert seen["template"] == "기본 요약"
     assert cli.main(["summarize", "--template", "없는 것"]) == 1
+
+
+# ---- second review --------------------------------------------------------------------------
+
+
+def test_record_with_an_unknown_template_leaves_nothing_behind(rig, isolated_home, capsys):
+    assert cli.main(["record", "--mic-only", "--template", "없는 템플릿"]) == 1
+    assert "no template named" in capsys.readouterr().err
+    assert store_for(isolated_home).list() == []
+
+
+def test_a_too_short_cli_recording_explains_itself_in_the_app(rig, isolated_home, monkeypatch):
+    monkeypatch.setattr(cli, "_wait_for_stop", lambda r, c: rig.speak(0, 4000, frames=100))
+    assert cli.main(["record", "--mic-only"]) == 0
+    (session,) = store_for(isolated_home).list()
+    assert [i["code"] for i in session.meta.issues] == ["too_short"]
+
+
+def test_list_shows_sessions_without_speech(isolated_home, capsys):
+    session = store_for(isolated_home).create("silent")
+    save_segments(session.path_for("transcript.json"), [], "ko", "t")
+    assert cli.main(["list"]) == 0
+    assert "no speech" in capsys.readouterr().out

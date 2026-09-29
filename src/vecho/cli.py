@@ -16,6 +16,7 @@ from pathlib import Path
 from . import __version__, audio, recording, roles, systemaudio, templates
 from .config import Config, load_config
 from .errors import SessionError, VechoError
+from .jobs import has_speech
 from .session import SUMMARY_MD, TRANSCRIPT_MD, Session, SessionStore
 from .summarize import OllamaClient, summarize_session
 from .transcribe import engine_label, transcribe_session
@@ -71,6 +72,7 @@ def _wait_for_stop(recorder: audio.Recorder, config: Config) -> None:
 
 def cmd_record(args: argparse.Namespace, config: Config) -> int:
     config = _overrides(config, args)
+    template = _template_arg(args, config)  # before anything is created on disk
     live = recording.LiveRecording(
         config,
         title=args.title or "",
@@ -78,7 +80,6 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
         remote=args.remote,
         mic_only=args.mic_only,
     )
-    template = _template_arg(args, config)
     live.start()
     if template:
         live.session.meta.template = template
@@ -95,6 +96,12 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
         raise
     result = live.stop()
     session = result.session
+    issues = list(result.issues)
+    if result.too_short:
+        issues.append({"code": "too_short", "role": "", "hint": ""})
+    if issues:  # the app explains these when the session is opened there
+        session.meta.issues = issues
+        session.save()
 
     _eprint(f"Saved {format_duration(session.meta.duration_sec)} of audio.")
     for warning in result.warnings:
@@ -233,13 +240,12 @@ def cmd_list(args: argparse.Namespace, config: Config) -> int:
     print(f"{'ID':<34} {'DURATION':<9} {'STATE':<12} TITLE")
     for session in sessions:
         meta = session.meta
-        state = (
-            "summarized"
-            if session.has_summary
-            else "transcribed"
-            if session.has_transcript
-            else "recorded"
-        )
+        if session.has_summary:
+            state = "summarized"
+        elif session.has_transcript:
+            state = "transcribed" if has_speech(session) else "no speech"
+        else:
+            state = "recorded"
         print(f"{session.id:<34} {format_duration(meta.duration_sec):<9} {state:<12} {meta.title}")
     return 0
 
