@@ -46,8 +46,9 @@ def merge_segments(*groups: Iterable[Segment]) -> list[Segment]:
 
 # Speaker bleed: without headphones the microphone re-records the other party's voice.
 ECHO_WINDOW_SEC = 3.0
-ECHO_COVERAGE = 0.8
-ECHO_LONGEST = 0.5
+# Share of the mic text found in runs of 3+ characters. Measured on Korean speech: echoes
+# with recognition differences score >= 0.80, genuine short replies <= 0.71.
+ECHO_COVERAGE = 0.75
 ECHO_MIN_RUN = 3
 ECHO_MIN_CHARS = 6
 
@@ -72,8 +73,7 @@ def _is_echo(segment: Segment, remote: Sequence[Segment]) -> bool:
     # Scattered one- or two-letter matches are just shared words ("일정", "예산"); an echo
     # repeats long runs of what was heard.
     matched = sum(block.size for block in blocks if block.size >= ECHO_MIN_RUN)
-    longest = max((block.size for block in blocks), default=0)
-    return matched / len(mine) >= ECHO_COVERAGE and longest / len(mine) >= ECHO_LONGEST
+    return matched / len(mine) >= ECHO_COVERAGE
 
 
 def remove_echo(segments: Sequence[Segment]) -> list[Segment]:

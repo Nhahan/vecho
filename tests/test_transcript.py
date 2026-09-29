@@ -190,3 +190,24 @@ def test_short_replies_sharing_words_with_the_other_side_are_kept():
     for text in ("일정 다시 잡죠", "마케팅 예산 얘기죠", "그때 이야기하죠"):
         kept = remove_echo([remote, seg(10, 12, "me", text)])
         assert [s.role for s in kept] == ["remote", "me"], text
+
+
+@pytest.mark.parametrize(
+    ("heard", "echo"),
+    [
+        (
+            "이번 분기 매출이 좀 떨어졌는데 원인을 파악해봐야 될 것 같아요",
+            "이번 분기 매출이 좀 떨어졌는데요 원인을 파악해 봐야 할 것 같아요",
+        ),
+        (
+            "다음 달에 새 매장을 오픈하고 이벤트를 시작할 예정입니다",
+            "다음 달에 새 매장을 오픈하구요 이벤트를 시작할 예정이에요",
+        ),
+        ("네 알겠습니다 그럼 그렇게 진행하시죠", "네 알겠습니다 그러면 그렇게 진행하시죠"),
+    ],
+)
+def test_echoes_with_recognition_differences_are_removed(heard, echo):
+    from vecho.transcript import remove_echo
+
+    kept = remove_echo([seg(0, 5, "remote", heard), seg(0.3, 5.2, "me", echo)])
+    assert [s.role for s in kept] == ["remote"]
