@@ -105,3 +105,77 @@ def test_load_segments_rejects_garbage(tmp_path):
         load_segments(path)
     with pytest.raises(SessionError):
         load_segments(tmp_path / "missing.json")
+
+
+# ---- speaker-bleed removal ------------------------------------------------------------
+
+
+def test_echo_of_remote_speech_is_removed_from_the_mic_track():
+    from vecho.transcript import remove_echo
+
+    segments = [
+        seg(1, 4, "remote", "안녕하세요. 오늘 주간 회의를 시작하겠습니다."),
+        seg(1, 4, "me", "안녕하세요 오늘 주간 회의를 시작하겠습니다"),
+        seg(6, 8, "me", "네, 좋습니다. 시작하시죠."),
+    ]
+    kept = remove_echo(segments)
+    assert [(s.role, s.text) for s in kept] == [
+        ("remote", "안녕하세요. 오늘 주간 회의를 시작하겠습니다."),
+        ("me", "네, 좋습니다. 시작하시죠."),
+    ]
+
+
+def test_echo_is_detected_across_different_segment_boundaries():
+    from vecho.transcript import remove_echo
+
+    segments = [
+        seg(0, 2, "remote", "첫 번째 안건은 신규 앱 출시 일정입니다."),
+        seg(2, 4, "remote", "개발팀은 다음 달 십오일까지 완성해주세요."),
+        seg(
+            0.5,
+            4,
+            "me",
+            "첫 번째 안건은 신규 앱 출시 일정입니다 개발팀은 다음 달 십오일까지 완성해주세요",
+        ),
+    ]
+    assert [s.role for s in remove_echo(segments)] == ["remote", "remote"]
+
+
+def test_same_words_far_apart_in_time_are_not_an_echo():
+    from vecho.transcript import remove_echo
+
+    segments = [
+        seg(0, 2, "remote", "마케팅 예산은 오백만 원입니다."),
+        seg(60, 62, "me", "마케팅 예산은 오백만 원입니다."),
+    ]
+    assert len(remove_echo(segments)) == 2
+
+
+def test_short_replies_and_different_speech_are_kept():
+    from vecho.transcript import remove_echo
+
+    segments = [
+        seg(0, 2, "remote", "네 알겠습니다"),
+        seg(0, 1, "me", "네"),
+        seg(1, 3, "remote", "내일 오전에 다시 연락드리겠습니다."),
+        seg(1, 3, "me", "그때 결제 모듈 이야기도 같이 하죠."),
+    ]
+    assert [s.text for s in remove_echo(segments) if s.role == "me"] == [
+        "네",
+        "그때 결제 모듈 이야기도 같이 하죠.",
+    ]
+
+
+def test_echo_removal_needs_a_remote_track_and_ignores_mixed():
+    from vecho.transcript import remove_echo
+
+    only_me = [
+        seg(0, 2, "me", "안녕하세요 오늘 회의를 시작합니다"),
+        seg(0, 2, "me", "안녕하세요 오늘 회의를 시작합니다"),
+    ]
+    assert remove_echo(only_me) == only_me
+    mixed = [
+        seg(0, 2, "remote", "안녕하세요 오늘 회의를 시작합니다"),
+        seg(0, 2, "mixed", "안녕하세요 오늘 회의를 시작합니다"),
+    ]
+    assert remove_echo(mixed) == mixed

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from . import roles
 from .errors import SessionError
 
 LabelFor = Callable[[str], str]
@@ -38,6 +41,45 @@ def merge_segments(*groups: Iterable[Segment]) -> list[Segment]:
     merged = [segment for group in groups for segment in group]
     merged.sort(key=lambda s: (s.start, s.end, s.role))
     return merged
+
+
+# Speaker bleed: without headphones the microphone re-records the other party's voice.
+ECHO_WINDOW_SEC = 3.0
+ECHO_COVERAGE = 0.7
+ECHO_MIN_CHARS = 6
+
+
+def _normalize(text: str) -> str:
+    return re.sub(r"[\W_]+", "", text).lower()
+
+
+def _is_echo(segment: Segment, remote: Sequence[Segment]) -> bool:
+    mine = _normalize(segment.text)
+    if len(mine) < ECHO_MIN_CHARS:
+        return False  # too short to tell an echo from a genuine "yes" or "okay"
+    nearby = [
+        r.text
+        for r in remote
+        if r.start <= segment.end + ECHO_WINDOW_SEC and r.end >= segment.start - ECHO_WINDOW_SEC
+    ]
+    heard = _normalize("".join(nearby))
+    if not heard:
+        return False
+    matcher = SequenceMatcher(None, mine, heard, autojunk=False)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / len(mine) >= ECHO_COVERAGE
+
+
+def remove_echo(segments: Sequence[Segment]) -> list[Segment]:
+    """Drop microphone segments that merely repeat what the remote track said at that moment.
+
+    The remote (loopback) track is a clean digital copy, so it wins. Coverage rather than
+    whole-string similarity is used so that differing segment boundaries do not hide an echo.
+    """
+    remote = [s for s in segments if s.role == roles.REMOTE]
+    if not remote:
+        return list(segments)
+    return [s for s in segments if not (s.role == roles.ME and _is_echo(s, remote))]
 
 
 def coalesce(segments: Sequence[Segment], max_gap: float = COALESCE_GAP_SEC) -> list[Segment]:

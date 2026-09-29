@@ -112,7 +112,7 @@ def transcribe_session(
         if result.language and result.duration > detected[0]:
             detected = (result.duration, result.language)
 
-    segments = transcript.merge_segments(*groups)
+    segments = transcript.remove_echo(transcript.merge_segments(*groups))
     language = config.language or detected[1]
     transcript.save_segments(
         session.path_for(TRANSCRIPT_JSON), segments, language, transcriber.model_name

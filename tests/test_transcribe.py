@@ -132,3 +132,21 @@ def test_model_is_loaded_once(tmp_path):
     transcriber.transcribe(tmp_path / "a.wav", "me")
     transcriber.transcribe(tmp_path / "b.wav", "remote")
     assert loads == ["tiny"]
+
+
+def test_microphone_echo_of_the_remote_track_is_dropped(tmp_path, config):
+    session = make_session(tmp_path, {"me": "me.wav", "remote": "remote.wav"})
+    model = FakeModel(
+        {
+            "me.wav": [
+                (0.2, 3.0, "오늘 주간 회의를 시작하겠습니다"),
+                (8.0, 9.0, "네 알겠습니다 감사합니다"),
+            ],
+            "remote.wav": [(0.0, 3.0, "오늘 주간 회의를 시작하겠습니다.")],
+        }
+    )
+    segments = transcribe_session(session, config, transcriber_for(model))
+    assert [(s.role, s.text) for s in segments] == [
+        ("remote", "오늘 주간 회의를 시작하겠습니다."),
+        ("me", "네 알겠습니다 감사합니다"),
+    ]
