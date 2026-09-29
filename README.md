@@ -5,9 +5,9 @@
 (최초 실행 시 모델 파일을 내려받을 때만 네트워크를 사용합니다.)
 
 ```
-마이크 ("나") ─────────┐                               ┌─ transcript.md
+마이크 ("나") ──────────┐                               ┌─ transcript.md
                        ├─ 트랙별 WAV ─ faster-whisper ─┤
-루프백 ("상대방") ─────┘   (me / remote)   (STT, 로컬) └─ summary.md ← Ollama (LLM, 로컬)
+시스템 오디오 ("상대방") ┘   (me / remote)   (STT, 로컬) └─ summary.md ← Ollama (LLM, 로컬)
 ```
 
 내 목소리(마이크)와 상대방 목소리(시스템 출력)를 **별도 트랙**으로 녹음하기 때문에, 화자 분리 모델 없이도
@@ -15,58 +15,65 @@
 
 ## 요구 사항
 
-- macOS (Apple Silicon 권장) — 다른 OS에서는 루프백 장치를 `--remote`로 직접 지정하세요.
+- macOS 14.4 이상 (Apple Silicon 권장)
 - Python 3.11 – 3.13, [uv](https://docs.astral.sh/uv/)
 - [Ollama](https://ollama.com) — 요약용 로컬 LLM
-- [BlackHole](https://github.com/ExistentialAudio/BlackHole) — 상대방 소리(시스템 출력) 캡처용 가상 오디오 장치
-- [switchaudio-osx](https://github.com/deweller/switchaudio-osx) — 녹음 중 소리 출력을 자동 전환
-- Xcode Command Line Tools (`xcode-select --install`) — Multi-Output 장치 생성에 `swift`를 사용
+- Xcode Command Line Tools (`xcode-select --install`) — 첫 실행 때 시스템 오디오 캡처 헬퍼(Swift)를 한 번 컴파일합니다
+
+**가상 오디오 드라이버(BlackHole 등)나 관리자 권한, 소리 설정 변경은 필요 없습니다.**
 
 ## 설치
 
 ```bash
 git clone https://github.com/Nhahan/vecho.git && cd vecho
-uv sync                                # 의존성 설치 (.venv 생성)
+uv tool install --editable .           # 어디서나 `vecho` 명령 사용
 
-brew install ollama switchaudio-osx
-ollama serve &                         # 또는 Ollama 앱 실행
+brew install ollama
+brew services start ollama             # 로그인 시 자동 실행
 ollama pull qwen3.8:27b                # 기본 요약 모델 (약 17GB, 메모리 32GB 이상 권장)
 
-brew install --cask blackhole-2ch      # 관리자 비밀번호 필요
-sudo killall coreaudiod                # 드라이버 로드 (재부팅해도 됨)
-
-uv run vecho doctor                    # 환경 점검
+vecho doctor                           # 환경 점검
 ```
 
-### 상대방 소리 캡처는 자동입니다
+### 상대방 소리 캡처 (설정 없음)
 
-Discord · Zoom · Meet · FaceTime · 카카오톡 등 **시스템 소리 출력으로 나오는 음성은 앱과 상관없이**
-전부 상대방 트랙으로 녹음됩니다. 설정할 것은 없습니다.
+Discord · Zoom · Meet · FaceTime · 카카오톡 등 **Mac에서 재생되는 모든 앱의 소리**를 상대방 트랙으로 녹음합니다.
+macOS의 Core Audio 프로세스 탭을 사용하므로 다음이 모두 성립합니다.
 
-`vecho record`를 시작하면 지금 듣고 있는 출력 장치(내장 스피커, AirPods, USB 헤드셋, 모니터 등)를
-자동으로 감지해서, 그 장치와 BlackHole로 **동시에** 소리를 보내는 `vecho Multi-Output`을 그 장치
-기준으로 만들고 출력으로 선택합니다. 종료(Ctrl+C, 오류 포함)하면 **원래 출력으로 되돌립니다.**
-(Multi-Output 장치는 볼륨 키가 동작하지 않아 평소에는 선택해 두지 않습니다.)
+- 가상 오디오 장치를 설치하지 않고, 사운드 설정 목록에 아무것도 추가되지 않습니다.
+- **소리 출력 장치를 바꾸지 않습니다.** 내가 듣는 소리에는 아무 영향이 없고 볼륨 키도 그대로 동작합니다.
+- 스피커, AirPods, USB 헤드셋, 모니터 어느 것으로 듣든, 통화 중에 바꿔도 끊김 없이 녹음됩니다.
+- 앱이 특정 출력 장치로 고정돼 있어도 녹음됩니다.
 
-- 녹음 중 출력 장치가 바뀌면(예: 통화 중 AirPods 연결) 2초 안에 감지해서 새 장치에 맞춰 다시 구성합니다.
-  이 전환 순간(수 초)에는 상대방 소리가 잠깐 끊길 수 있습니다.
-- 비정상 종료로 복구되지 못한 경우에도 다음 실행 때 원래 출력을 복구합니다.
-- 출력이 BlackHole 같은 가상 장치이거나 BlackHole과 결합할 수 없는 장치면, 소리는 그대로 들리고
-  경고만 표시됩니다(그 트랙은 무음으로 기록되고 종료 시 알려줍니다).
-- 자동 전환이 싫다면 `vecho record --no-routing`. `vecho setup`으로 미리 만들거나 `--remove`로 지울 수도 있습니다.
-
-> **앱의 자체 출력 설정에 주의하세요.** Discord 등에서 출력 장치를 특정 장치로 **고정**해 두면 시스템 출력을
-> 우회하므로 녹음되지 않습니다. 앱의 오디오 설정에서 출력 장치를 **기본값(Default)** 으로 두세요.
-> 내 목소리는 시스템 기본 마이크로 녹음됩니다.
+처음 녹음할 때 macOS가 터미널 앱의 **시스템 오디오 녹음** 권한을 묻습니다. 허용하세요.
+상대방 트랙이 무음이라고 경고가 나오면 시스템 설정 → 개인정보 보호 및 보안 →
+**화면 및 시스템 오디오 녹음**에서 사용 중인 터미널 앱을 켜고, 재생 중인 소리가 있는지 확인하세요.
 
 > 헤드폰을 쓰면 가장 깨끗합니다. 스피커로 들으면 상대방 소리가 마이크에 다시 들어가지만,
-> 깨끗한 루프백 트랙과 비교해 **마이크 쪽 에코는 전사 단계에서 자동으로 제거**됩니다
+> 깨끗한 시스템 오디오 트랙과 비교해 **마이크 쪽 에코는 전사 단계에서 자동으로 제거**됩니다
 > (6글자 미만의 짧은 맞장구는 구분이 어려워 그대로 둡니다).
+
+<details>
+<summary>macOS 14.4 미만 (BlackHole 사용)</summary>
+
+시스템 오디오 캡처를 쓸 수 없는 구형 macOS에서는 루프백 장치로 대체됩니다.
+
+```bash
+brew install --cask blackhole-2ch switchaudio-osx   # BlackHole 설치는 관리자 비밀번호 필요
+sudo killall coreaudiod                             # 드라이버 로드 (재부팅해도 됨)
+```
+
+`vecho record`가 BlackHole을 자동으로 찾아, 녹음하는 동안에만 현재 출력 장치와 BlackHole로 동시에 내보내는
+`vecho Multi-Output`을 만들어 선택하고 종료하면 원래 출력으로 되돌립니다(통화 중 출력이 바뀌면 따라갑니다).
+`--no-routing`으로 자동 전환을 끌 수 있고, `vecho setup [--remove]`로 장치를 미리 만들거나 지울 수 있습니다.
+이 방식에서는 앱의 출력 장치가 **기본값**이어야 하며, 특정 장치로 고정된 앱은 녹음되지 않습니다.
+
+</details>
 
 ## 빠른 시작
 
 ```bash
-uv run vecho record --title "주간 회의" --language ko
+vecho record --title "주간 회의" --language ko
 # ● REC 00:12:41  나 ████░░░░  상대방 ██░░░░░░     ← Ctrl+C 로 종료
 ```
 
@@ -85,7 +92,7 @@ uv run vecho record --title "주간 회의" --language ko
 
 | 명령 | 설명 |
 | --- | --- |
-| `vecho setup` | (선택) Multi-Output 장치 미리 만들기 (`--force` 재생성, `--remove` 삭제) |
+| `vecho setup` | (구형 macOS·BlackHole 전용) Multi-Output 장치 미리 만들기 / `--remove` 삭제 |
 | `vecho record` | 마이크 + 시스템 오디오 녹음 후 전사·요약 (`--no-process`로 녹음만) |
 | `vecho import --me a.wav --remote b.wav` | 이미 있는 오디오 파일로 세션 생성 (`--mixed`는 한 파일에 양쪽이 섞인 경우) |
 | `vecho transcribe [세션]` | 전사만 다시 실행 |
@@ -93,15 +100,16 @@ uv run vecho record --title "주간 회의" --language ko
 | `vecho list` | 세션 목록 |
 | `vecho show [세션]` | 요약 출력 (`--transcript` 전사문, `--path` 폴더 경로) |
 | `vecho devices` | 오디오 입력 장치 목록 (`loopback` 표시) |
-| `vecho doctor` | 마이크 · BlackHole · 현재 출력 · Whisper · Ollama 점검 |
+| `vecho doctor` | 마이크 · 시스템 오디오 캡처 · Whisper · Ollama 점검 |
 
 `[세션]`에는 전체 ID, 앞부분(prefix), 일부 문자열 또는 `latest`(기본값)를 쓸 수 있습니다.
 
 자주 쓰는 옵션:
 
 ```bash
-vecho record --mic "MacBook" --remote blackhole   # 장치를 이름 일부 또는 번호로 지정
-vecho record --mic-only                           # 마이크만 녹음 (BlackHole 없이)
+vecho record --mic "MacBook"                     # 마이크를 이름 일부 또는 번호로 지정
+vecho record --remote blackhole                   # 시스템 오디오 대신 루프백 장치 사용
+vecho record --mic-only                           # 상대방 소리 없이 마이크만 녹음
 vecho record --model small --language ko          # 더 가벼운 Whisper 모델
 vecho summarize --llm-model gemma3:12b --summary-language English
 ```
