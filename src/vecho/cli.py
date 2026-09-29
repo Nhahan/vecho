@@ -80,10 +80,9 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
         remote=args.remote,
         mic_only=args.mic_only,
     )
-    live.start()
     if template:
-        live.session.meta.template = template
-        live.session.save()
+        live.session.meta.template = template  # saved by start()
+    live.start()
     try:
         _eprint(f"Recording to {live.session.dir}")
         for role, source in live.sources:

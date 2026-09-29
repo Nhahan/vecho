@@ -108,8 +108,18 @@ class LiveRecording:
             raise
         # Register the tracks first so an interrupted or failed stop still leaves a usable session.
         self.session.meta.tracks = {role: f"{role}.wav" for role, _ in self.sources}
-        self.session.save()
+        try:
+            self.session.save()
+        except BaseException:
+            self.discard()  # never leave a microphone running that nobody can stop
+            raise
         self._started_at = time.monotonic()
+
+    def discard(self) -> None:
+        """Stop capturing and delete the session: for a start that could not complete."""
+        with contextlib.suppress(Exception):
+            self.recorder.stop()
+        shutil.rmtree(self.session.dir, ignore_errors=True)
 
     @property
     def elapsed(self) -> float:
