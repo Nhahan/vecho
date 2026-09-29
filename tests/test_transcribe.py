@@ -150,3 +150,43 @@ def test_microphone_echo_of_the_remote_track_is_dropped(tmp_path, config):
         ("remote", "오늘 주간 회의를 시작하겠습니다."),
         ("me", "네 알겠습니다 감사합니다"),
     ]
+
+
+def words(*items):
+    return [SimpleNamespace(start=a, end=b, word=w) for a, b, w in items]
+
+
+def test_segments_are_split_where_the_speaker_paused():
+    from vecho.transcribe import split_at_pauses
+
+    raw = SimpleNamespace(
+        start=0.1,
+        end=38.8,
+        text=" 안녕하세요 오늘은 좋네요 그럼",
+        words=words(
+            (0.1, 0.6, " 안녕하세요"),
+            (0.7, 1.2, " 오늘은"),
+            (15.0, 15.5, " 좋네요"),
+            (15.6, 16.0, " 그럼"),
+        ),
+    )
+    parts = split_at_pauses(raw, "me")
+    assert [(p.start, p.end, p.text) for p in parts] == [
+        (0.1, 1.2, "안녕하세요 오늘은"),
+        (15.0, 16.0, "좋네요 그럼"),
+    ]
+
+
+def test_segments_without_word_timings_are_kept_whole():
+    from vecho.transcribe import split_at_pauses
+
+    raw = SimpleNamespace(start=1.0, end=2.0, text="  hello ", words=None)
+    assert [(p.start, p.text) for p in split_at_pauses(raw, "remote")] == [(1.0, "hello")]
+    assert split_at_pauses(SimpleNamespace(start=0, end=1, text="  ", words=[]), "me") == []
+
+
+def test_word_timestamps_are_requested(tmp_path, config):
+    session = make_session(tmp_path, {"me": "me.wav"})
+    model = FakeModel({"me.wav": [(0, 1, "hi")]})
+    transcribe_session(session, config, transcriber_for(model))
+    assert model.calls[0][1]["word_timestamps"] is True

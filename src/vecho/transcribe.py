@@ -10,7 +10,7 @@ from typing import Any
 from . import transcript
 from .config import Config
 from .errors import TranscriptionError
-from .session import TRANSCRIPT_JSON, TRANSCRIPT_MD, Session, now_iso
+from .session import TRANSCRIPT_JSON, TRANSCRIPT_MD, Session, now_iso, write_atomic
 from .transcript import Segment
 
 # (role, seconds transcribed so far, total seconds)
@@ -29,6 +29,38 @@ def _default_model_factory(name: str, compute_type: str) -> Any:
     from faster_whisper import WhisperModel
 
     return WhisperModel(name, device="auto", compute_type=compute_type)
+
+
+# A pause this long inside one Whisper segment means the speaker stopped (typically while the
+# other party talked on the other track), so the text is split there.
+PAUSE_SPLIT_SEC = 0.8
+
+
+def split_at_pauses(raw: Any, role: str, pause: float = PAUSE_SPLIT_SEC) -> list[Segment]:
+    """Turn one Whisper segment into one or more segments, cut where the speaker paused.
+
+    Whisper happily returns a single segment spanning half a minute of silence between two of
+    your sentences. On a per-speaker track that silence is where the other side spoke, so
+    keeping it would put your later sentence before their reply in the merged transcript.
+    """
+    words = [w for w in (getattr(raw, "words", None) or []) if w.word.strip()]
+    if not words:
+        text = raw.text.strip()
+        return [Segment(float(raw.start), float(raw.end), role, text)] if text else []
+    pieces: list[list[Any]] = [[words[0]]]
+    for previous, word in zip(words, words[1:], strict=False):
+        if float(word.start) - float(previous.end) >= pause:
+            pieces.append([])
+        pieces[-1].append(word)
+    return [
+        Segment(
+            float(piece[0].start),
+            float(piece[-1].end),
+            role,
+            "".join(w.word for w in piece).strip(),
+        )
+        for piece in pieces
+    ]
 
 
 class Transcriber:
@@ -72,13 +104,13 @@ class Transcriber:
                 vad_parameters={"min_silence_duration_ms": 500},
                 # Feeding earlier text back in is the main cause of repetition loops.
                 condition_on_previous_text=False,
+                # Needed to split segments at pauses (see split_at_pauses).
+                word_timestamps=True,
             )
             duration = float(getattr(info, "duration", 0.0) or 0.0)
             segments: list[Segment] = []
             for raw in raw_segments:  # lazy generator: decoding happens while iterating
-                text = raw.text.strip()
-                if text:
-                    segments.append(Segment(float(raw.start), float(raw.end), role, text))
+                segments.extend(split_at_pauses(raw, role))
                 if on_progress:
                     on_progress(role, float(raw.end), duration)
         except TranscriptionError:
@@ -117,9 +149,9 @@ def transcribe_session(
     transcript.save_segments(
         session.path_for(TRANSCRIPT_JSON), segments, language, transcriber.model_name
     )
-    session.path_for(TRANSCRIPT_MD).write_text(
+    write_atomic(
+        session.path_for(TRANSCRIPT_MD),
         transcript.render_markdown(session.display_title, segments, config.label_for),
-        encoding="utf-8",
     )
 
     meta = session.meta
