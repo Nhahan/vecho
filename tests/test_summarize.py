@@ -282,3 +282,23 @@ def test_summarize_session_uses_the_sessions_template(tmp_path, config, ollama):
     markdown = summarize_session(session, config, client_for(ollama))
     assert "## 3. 다짐" in markdown and "· 멘토링" in markdown
     assert session.meta.template == "멘토링"
+
+
+def test_a_dropped_connection_is_a_summarization_error():
+    import socket
+    import threading
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+
+    def accept_and_close():
+        conn, _ = server.accept()
+        conn.recv(65536)
+        conn.close()
+
+    threading.Thread(target=accept_and_close, daemon=True).start()
+    client = OllamaClient(f"http://127.0.0.1:{server.getsockname()[1]}", "m", timeout=5)
+    with pytest.raises(SummarizationError, match="lost the connection"):
+        client.chat("s", "u")
+    server.close()

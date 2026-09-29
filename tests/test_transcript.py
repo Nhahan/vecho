@@ -179,3 +179,14 @@ def test_echo_removal_needs_a_remote_track_and_ignores_mixed():
         seg(0, 2, "mixed", "안녕하세요 오늘 회의를 시작합니다"),
     ]
     assert remove_echo(mixed) == mixed
+
+
+def test_short_replies_sharing_words_with_the_other_side_are_kept():
+    from vecho.transcript import remove_echo
+
+    remote = seg(
+        0, 30, "remote", "다음 주 일정은 마케팅 예산 확정 후에 다시 이야기하죠 그때 정하면 됩니다"
+    )
+    for text in ("일정 다시 잡죠", "마케팅 예산 얘기죠", "그때 이야기하죠"):
+        kept = remove_echo([remote, seg(10, 12, "me", text)])
+        assert [s.role for s in kept] == ["remote", "me"], text

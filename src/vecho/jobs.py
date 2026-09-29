@@ -80,15 +80,15 @@ class Processor:
         """Queue processing; ``template`` (a template name) is remembered for the session."""
         if step not in STEPS:
             raise VechoError(f"unknown processing step '{step}'")
-        if template is not None and template != session.meta.template:
-            session.meta.template = template
-            session.save()
         with self._lock:
             current = self._states.get(session.id)
             if current is not None and current.active:
-                return current  # already queued or running
+                return current  # already queued or running: its template stays as it was
             state = JobState(session.id, step)
             self._states[session.id] = state
+        if template is not None and template != session.meta.template:
+            session.meta.template = template
+            session.save()
         self._queue.put((session, state))
         return state
 

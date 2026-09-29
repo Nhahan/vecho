@@ -7,6 +7,7 @@ notes are merged into the final summary (reduce).
 
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import urllib.error
@@ -195,6 +196,8 @@ class OllamaClient:
             ) from exc
         except json.JSONDecodeError as exc:
             raise SummarizationError(f"Ollama sent an unreadable response: {exc}") from exc
+        except (http.client.HTTPException, OSError) as exc:  # e.g. Ollama crashed mid-answer
+            raise SummarizationError(f"lost the connection to Ollama: {exc}") from exc
 
     def chat(self, system: str, user: str) -> str:
         data = self._request(
