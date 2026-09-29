@@ -56,6 +56,16 @@ const T = KO ? {
   save: "저장", tplSaved: "템플릿을 저장했습니다", tplDeleted: "템플릿을 삭제했습니다",
   tplDelTitle: "이 템플릿을 삭제할까요?", tplDelBody: "이미 만든 요약은 그대로 남습니다.",
   summarizeWith: "이 템플릿으로 다시 요약", manageTemplates: "템플릿 관리…", back: "돌아가기",
+  errors: {
+    template_name_empty: "템플릿 이름을 입력하세요.", template_name_long: "템플릿 이름은 60자까지 쓸 수 있습니다.",
+    template_builtin: "'기본 요약'은 내장 템플릿이라 다른 이름을 써야 합니다.", template_name_bad: "이름에 쓸 수 없는 문자가 있습니다.",
+    template_no_heading: "템플릿에 # 으로 시작하는 제목 줄이 하나 이상 있어야 합니다.", template_too_long: "템플릿이 너무 깁니다 (최대 20,000자).",
+    template_exists: "같은 이름의 템플릿이 이미 있습니다.", template_missing: "그 템플릿을 찾을 수 없습니다.",
+    already_recording: "이미 녹음 중입니다.", not_recording: "녹음 중이 아닙니다.", session_missing: "녹음을 찾을 수 없습니다.",
+    title_empty: "제목을 입력하세요.", session_busy: "녹음하거나 정리하는 중이라 지금은 할 수 없습니다.",
+    file_type: "지원하지 않는 파일 형식입니다. (mp3, m4a, wav, flac, ogg, webm)", file_size: "파일이 비어 있거나 너무 큽니다.",
+    upload_interrupted: "파일을 올리다가 끊겼습니다. 다시 시도해 주세요.", no_audio: "이 녹음에는 재생할 소리가 없습니다.",
+  },
 } : {
   start: "New recording", stop: "Stop and summarize", recording: "Recording", withRemote: "Include the other side",
   untitled: "Untitled", untitledAt: (t) => `Conversation at ${t}`, titlePh: "Add a title", systemAudio: "System audio (all apps)", search: "Search", importTip: "Import an audio file",
@@ -105,6 +115,16 @@ const T = KO ? {
   save: "Save", tplSaved: "Template saved", tplDeleted: "Template deleted",
   tplDelTitle: "Delete this template?", tplDelBody: "Summaries already made with it stay as they are.",
   summarizeWith: "Summarize again with this template", manageTemplates: "Manage templates…", back: "Back",
+  errors: {
+    template_name_empty: "Give the template a name.", template_name_long: "Template names can have up to 60 characters.",
+    template_builtin: "That name belongs to the built-in template; choose another.", template_name_bad: "The name contains characters that can't be used.",
+    template_no_heading: "A template needs at least one heading line starting with #.", template_too_long: "The template is too long (20,000 characters max).",
+    template_exists: "A template with that name already exists.", template_missing: "That template no longer exists.",
+    already_recording: "A recording is already running.", not_recording: "Nothing is being recorded.", session_missing: "That recording no longer exists.",
+    title_empty: "The title can't be empty.", session_busy: "Not possible while this recording is being recorded or processed.",
+    file_type: "That file type isn't supported (mp3, m4a, wav, flac, ogg, webm).", file_size: "The file is empty or too large.",
+    upload_interrupted: "The upload was interrupted. Please try again.", no_audio: "This recording has no audio to play.",
+  },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -131,7 +151,7 @@ async function api(path, { method = "GET", body, headers = {} } = {}) {
   let response;
   try { response = await fetch("/api/" + path, init); } catch { throw new Error(T.offline); }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || response.statusText);
+  if (!response.ok) throw new Error((data.code && T.errors[data.code]) || data.error || response.statusText);
   return data;
 }
 
@@ -155,8 +175,10 @@ function spoken(sec) {
   if (sec == null) return "";
   sec = Math.round(sec);
   if (sec < 60) return `${sec}${T.seconds}`;
-  const h = Math.floor(sec / 3600), m = Math.round((sec % 3600) / 60);
-  return h ? `${h}${T.hours} ${m}${T.minutes}` : `${m}${T.minutes}`;
+  const total = Math.round(sec / 60); // round first, so 59.5 minutes never shows as "60분"
+  const h = Math.floor(total / 60), m = total % 60;
+  if (!h) return `${m}${T.minutes}`;
+  return m ? `${h}${T.hours} ${m}${T.minutes}` : `${h}${T.hours}`;
 }
 const dayOf = (iso) => new Date(iso).toLocaleDateString(LOCALE, { month: "long", day: "numeric", weekday: "long" });
 const timeOf = (iso) => new Date(iso).toLocaleTimeString(LOCALE, { hour: "numeric", minute: "2-digit" });
@@ -339,7 +361,9 @@ function renderMarkdown(md, id) {
       i += 2;
       const rows = [];
       while (i < lines.length && /^\s*\|/.test(lines[i])) rows.push(cells(lines[i++]));
-      const body = rows.filter((r) => r.some((c) => c)).map((r) => `<tr>${head.map((_, c) => `<td>${mdInline(r[c] || "")}</td>`).join("")}</tr>`).join("");
+      // cells past the header's width (an extra "|" in the text) join the last column
+      const fit = (r) => r.length > head.length ? [...r.slice(0, head.length - 1), r.slice(head.length - 1).join(" | ")] : r;
+      const body = rows.filter((r) => r.some((c) => c)).map(fit).map((r) => `<tr>${head.map((_, c) => `<td>${mdInline(r[c] || "")}</td>`).join("")}</tr>`).join("");
       out.push(`<div class="tbl"><table><thead><tr>${head.map((h) => `<th>${mdInline(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`);
       continue;
     }
