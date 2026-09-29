@@ -18,7 +18,14 @@ from . import transcript
 from .config import Config
 from .errors import SummarizationError
 from .session import SUMMARY_MD, TRANSCRIPT_JSON, Session, now_iso, write_atomic
-from .templates import Template, TemplateStore, conform, remove_copied, strip_fences
+from .templates import (
+    Template,
+    TemplateStore,
+    conform,
+    drop_placeholders,
+    remove_copied,
+    strip_fences,
+)
 
 # (stage, step, total steps)
 ProgressCallback = Callable[[str, int, int], None]
@@ -112,8 +119,9 @@ Rules:
   shows the format and the level of detail. Never copy it: every fact you write must come
   from the {source} below.
 - Fill in only what the {source} actually supports. When nothing fits a section, a label or
-  a table, leave it empty: keep the heading or label and write nothing after it. Do not write
-  placeholders such as "없음", "N/A", "-" or guesses.
+  a table, leave it empty: keep the heading or label and write nothing after it. Never write
+  fillers such as "없음", "정보 없음", "(전사 기록에 해당 정보 없음)", "N/A", "-" or guesses,
+  and do not add table rows you cannot fill.
 - Write in {language}. Reply with the filled-in Markdown only, without a code block.
 
 TEMPLATE:
@@ -254,7 +262,7 @@ def summarize_lines(
         )
         prompt = FROM_NOTES_WITH_TEMPLATE if from_notes else FROM_TRANSCRIPT_WITH_TEMPLATE
         answer = strip_fences(client.chat(system, prompt.format(rules=rules, text=text)))
-        return conform(remove_copied(answer, template.body), template.body)
+        return conform(drop_placeholders(remove_copied(answer, template.body)), template.body)
 
     if len(chunks) == 1:
         if on_progress:

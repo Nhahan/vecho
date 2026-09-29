@@ -5,6 +5,7 @@ from vecho.templates import (
     TemplateError,
     TemplateStore,
     conform,
+    drop_placeholders,
     example_lines,
     headings,
     remove_copied,
@@ -173,3 +174,43 @@ def test_store_requires_a_heading(tmp_path):
 def test_top_sections_are_the_ones_every_summary_has():
     assert top_sections(EXAMPLE) == ["1. 현황 스냅샷", "2. 핵심 인사이트", "3. 로드맵", "4. 다짐"]
     assert top_sections("no headings") == []
+
+
+def test_fillers_are_removed_but_facts_that_say_none_stay():
+    answer = """## 1. 현황 스냅샷
+
+- **지원 현황**
+    - (전사 기록에 해당 정보 없음)
+- **면접**: 정보 없음
+- **과제**
+    - 과제는 아직 받은 것 없음
+- N/A
+- 원티드 150개
+
+| 시기 | 활동 | 비고 |
+| --- | --- | --- |
+| (전사 기록에 해당 정보 없음) | | |
+| 과거 | 은행 창구 근무 | 3년 |
+
+> (해당 내용 없음)
+"""
+    cleaned = drop_placeholders(answer)
+    assert "정보 없음" not in cleaned and "N/A" not in cleaned and "해당 내용 없음" not in cleaned
+    assert "- **지원 현황**" in cleaned and "- **면접**" in cleaned  # labels stay, empty
+    assert "과제는 아직 받은 것 없음" in cleaned and "원티드 150개" in cleaned
+    assert "| 과거 | 은행 창구 근무 | 3년 |" in cleaned and "| 시기 | 활동 | 비고 |" in cleaned
+
+
+def test_example_subheadings_filled_only_with_fillers_disappear():
+    answer = """## 2. 핵심 인사이트
+
+### 💡 공부 ≠ 취업 준비
+
+> (전사 기록에 해당 정보 없음)
+
+### 💡 도메인은 하나로
+
+- 핀테크로 통일
+"""
+    result = conform(drop_placeholders(answer), EXAMPLE)
+    assert "공부 ≠ 취업 준비" not in result and "도메인은 하나로" in result

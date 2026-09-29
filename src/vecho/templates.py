@@ -201,6 +201,54 @@ def remove_copied(summary: str, body: str) -> str:
     return "\n".join(kept)
 
 
+# "Nothing to say" fillers models write even when told to leave a field empty.
+_PLACEHOLDER = re.compile(
+    r"^(?:없음|없다|없습니다|해당\s*없음|미정|미확인|미언급|n/?a|none|nothing|tbd|unknown|not\s+mentioned|"
+    r"no\s+information|[-–—?]+)$"
+    r"|(?:정보|내용|언급|기록|해당\s*사항|자료|논의)\s*(?:이|가|은|는)?\s*(?:없|부족|확인\s*(?:되지|불가))"
+    r"|(?:not|never)\s+(?:mentioned|discussed|covered|stated)|no\s+(?:information|mention|details)",
+    re.IGNORECASE,
+)
+_PREFIX = re.compile(r"^(\s*(?:[-*+]|\d+[.)]|>)?\s*)")
+_LABEL = re.compile(r"\*\*[^*]+\*\*\s*:?\s*")
+
+
+def _is_placeholder(text: str) -> bool:
+    text = re.sub(r"\*\*|__|`", "", text).strip().strip("()[]{}（）「」.。,·:;").strip()
+    return bool(text) and len(text) <= 40 and bool(_PLACEHOLDER.search(text))
+
+
+def drop_placeholders(summary: str) -> str:
+    """Remove "no information" fillers, so an unfilled field really stays empty.
+
+    Only whole values are judged: "(전사 기록에 해당 정보 없음)" goes, while a real fact such as
+    "과제는 아직 받은 것 없음" stays. A label keeps its line and loses just the filler, and a
+    table row made only of fillers is dropped.
+    """
+    kept = []
+    for line in summary.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("|") and not re.fullmatch(r"\|?[\s:|-]+\|?", stripped):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
+            if all(not c or _is_placeholder(c) for c in cells):
+                continue
+            kept.append(line)
+            continue
+        if _HEADING.match(stripped):
+            kept.append(line)
+            continue
+        prefix = _PREFIX.match(line).group(1)
+        rest = line[len(prefix) :]
+        label = _LABEL.match(rest)
+        value = rest[label.end() :] if label else rest
+        if value.strip() and _is_placeholder(value):
+            if label:
+                kept.append((prefix + rest[: label.end()]).rstrip().rstrip(":").rstrip())
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
 def _split_sections(markdown: str) -> tuple[list[str], list[tuple[str, list[str]]]]:
     """Leading lines, then ``(heading line, body lines)`` for every heading."""
     preamble: list[str] = []
@@ -231,7 +279,8 @@ def conform(summary: str, body: str) -> str:
     keys = [_norm(text) for _, text in wanted]
     preamble, sections = _split_sections(summary)
 
-    bodies: dict[int, list[str]] = {}
+    own: dict[int, list[str]] = {}  # what the model wrote directly under a template heading
+    extra: dict[int, list[str]] = {}  # headings the model added, kept after that section
     current = -1
     for heading_line, lines in sections:
         match = _HEADING.match(heading_line)
@@ -242,27 +291,33 @@ def conform(summary: str, body: str) -> str:
             index = next(
                 (i for i, k in enumerate(keys) if k and key and (k in key or key in k)), -1
             )
-        if index >= 0 and index not in bodies:
+        if index >= 0 and index not in own:
             current = index
-            bodies[current] = lines
+            own[current] = lines
         elif current >= 0:
-            bodies[current] += ["", heading_line, *lines]
+            extra.setdefault(current, []).extend(["", heading_line, *lines])
         else:
             preamble += [heading_line, *lines]
 
+    def trimmed(lines: list[str]) -> list[str]:
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+        while lines and not lines[-1].strip():
+            lines = lines[:-1]
+        return lines
+
     out: list[str] = []
     for index, (level, text) in enumerate(wanted):
-        content = bodies.get(index, [])
-        while content and not content[0].strip():
-            content = content[1:]
-        while content and not content[-1].strip():
-            content = content[:-1]
-        if level > top and not content:
-            continue  # a sub-heading the model did not fill (often the example's own content)
-        out.append(f"{'#' * level} {text}")
-        if content:
-            out += ["", *content]
-        out.append("")
+        content = trimmed(own.get(index, []))
+        added = trimmed(extra.get(index, []))
+        if level == top or content:
+            out.append(f"{'#' * level} {text}")
+            if content:
+                out += ["", *content]
+            out.append("")
+        # else: a sub-heading the model left empty (often the example's own content)
+        if added:
+            out += [*added, ""]
     return "\n".join(out).strip() + "\n"
 
 
