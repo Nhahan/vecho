@@ -102,7 +102,7 @@ class App:
         template = self._template_name(template)
         with self._lock:
             if self._live is not None or self._starting:
-                raise Conflict("a recording is already running")
+                raise Conflict("a recording is already running", "already_recording")
             self._starting = True
         try:
             # Outside the lock: the first start may build the capture helper, which takes a
@@ -125,7 +125,7 @@ class App:
             if live is not None:
                 self._stopping.add(live.session.id)  # not deletable while being finalized
         if live is None:
-            raise Conflict("nothing is being recorded")
+            raise Conflict("nothing is being recorded", "not_recording")
         # (quitting waits for _stopping to empty; see shutdown())
         try:
             result = live.stop()
@@ -184,10 +184,10 @@ class App:
 
     def _session(self, session_id: str) -> Session:
         if not _SESSION_ID.match(session_id) or session_id in {".", ".."}:
-            raise NotFound("no such session")
+            raise NotFound("no such session", "session_missing")
         directory = self.store.root / session_id
         if not (directory / "session.json").is_file():
-            raise NotFound("no such session")
+            raise NotFound("no such session", "session_missing")
         return Session.load(directory)
 
     def _status(self, session: Session) -> str:
@@ -271,7 +271,7 @@ class App:
         session = self._session(session_id)
         title = title.strip()
         if not title:
-            raise VechoError("the title cannot be empty")
+            raise VechoError("the title cannot be empty", "title_empty")
         session.meta.title = title[:200]
         session.save()
         live = self._live
@@ -283,7 +283,7 @@ class App:
         session = self._session(session_id)
         with self._lock:  # no job may be queued between the check and the removal
             if self._status(session) in {"recording", "processing"}:
-                raise Conflict("this session is still being recorded or processed")
+                raise Conflict("this session is still being recorded or processed", "session_busy")
             shutil.rmtree(session.dir)
             self.processor.forget(session_id)
             self._issues.pop(session_id, None)
@@ -294,11 +294,11 @@ class App:
         with self._lock:  # no delete between the check and queueing the job
             status = self._status(session)
             if status == "recording":
-                raise Conflict("stop the recording first")
+                raise Conflict("stop the recording first", "session_busy")
             if status == "processing":
-                raise Conflict("this session is already being processed")
+                raise Conflict("this session is already being processed", "session_busy")
             if not session.dir.is_dir():
-                raise NotFound("no such session")
+                raise NotFound("no such session", "session_missing")
             if step == "summarize" and not session.has_transcript:
                 step = "all"
             self.processor.submit(session, step, name)
@@ -312,7 +312,7 @@ class App:
             return self.templates.default_name()
         template = self.templates.get(name)
         if template.name != name:
-            raise NotFound(f"no template named '{name}'")
+            raise NotFound(f"no template named '{name}'", "template_missing")
         return template.name
 
     def list_templates(self) -> dict[str, Any]:
@@ -330,6 +330,13 @@ class App:
         }
 
     def save_template(self, name: str, body: str, previous: str | None = None) -> dict[str, Any]:
+        """Create (``previous`` None) or update/rename (``previous`` = its current name)."""
+        if previous is None:
+            wanted = unicodedata.normalize("NFC", " ".join(name.split())).casefold()
+            if any(t.name.casefold() == wanted for t in self.templates.list()[1:]):
+                raise templates.TemplateError(
+                    f"a template named '{name}' already exists", "template_exists"
+                )
         self.templates.save(name, body, previous)
         return self.list_templates()
 
@@ -347,9 +354,9 @@ class App:
         template = self._template_name(template)
         suffix = Path(filename).suffix.lower()
         if suffix not in AUDIO_EXTENSIONS:
-            raise VechoError(f"unsupported file type '{suffix or filename}'")
+            raise VechoError(f"unsupported file type '{suffix or filename}'", "file_type")
         if length <= 0 or length > MAX_UPLOAD_BYTES:
-            raise VechoError("the file is empty or too large")
+            raise VechoError("the file is empty or too large", "file_size")
         session = self.store.create(unicodedata.normalize("NFC", Path(filename).stem))
         name = f"{roles.MIXED}{suffix}"
         target = session.path_for(name)
@@ -361,7 +368,7 @@ class App:
                 while remaining:
                     chunk = stream.read(min(1024 * 1024, remaining))
                     if not chunk:
-                        raise VechoError("the upload was interrupted")
+                        raise VechoError("the upload was interrupted", "upload_interrupted")
                     out.write(chunk)
                     remaining -= len(chunk)
             session.meta.tracks = {roles.MIXED: name}
@@ -389,7 +396,7 @@ class App:
             if role in session.meta.tracks
         }
         if not tracks:
-            raise NotFound("this session has no audio")
+            raise NotFound("this session has no audio", "no_audio")
         if len(tracks) == 1 and _plain_wav(tracks[0]):
             return tracks[0]
         mix = session.path_for(MIX_FILE)
@@ -621,8 +628,8 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._send(status, body, "application/json; charset=utf-8")
 
-    def _error(self, status: int, message: str) -> None:
-        self._json(status, {"error": message})
+    def _error(self, status: int, message: str, code: str | None = None) -> None:
+        self._json(status, {"error": message, **({"code": code} if code else {})})
 
     def _length(self) -> int:
         raw = (self.headers.get("Content-Length") or "0").strip()
@@ -693,11 +700,11 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self._route(self.command, parts, query)
         except NotFound as exc:
-            self._error(HTTPStatus.NOT_FOUND, str(exc))
+            self._error(HTTPStatus.NOT_FOUND, str(exc), exc.code)
         except Conflict as exc:
-            self._error(HTTPStatus.CONFLICT, str(exc))
+            self._error(HTTPStatus.CONFLICT, str(exc), exc.code)
         except (SessionError, VechoError) as exc:
-            self._error(HTTPStatus.BAD_REQUEST, str(exc))
+            self._error(HTTPStatus.BAD_REQUEST, str(exc), exc.code)
         except (ConnectionError, BrokenPipeError):
             raise  # the client went away; nothing to answer
         except Exception as exc:  # never drop a request without an answer

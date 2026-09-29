@@ -809,3 +809,27 @@ def test_unexpected_errors_still_get_an_answer(served, monkeypatch):
     monkeypatch.setattr(app, "list_sessions", lambda: 1 / 0)
     status, body, _ = client.call("GET", "/api/sessions")
     assert status == 500 and "unexpected error" in body["error"]
+
+
+def test_errors_carry_a_code_for_translated_messages(served):
+    _, client = served
+    client.call("PUT", "/api/templates/A", {"body": "## a\n"})
+    client.call("PUT", "/api/templates/B", {"body": "## b\n"})
+    status, body, _ = client.call("PUT", "/api/templates/B", {"body": "## x\n", "previous": "A"})
+    assert status == 400 and body["code"] == "template_exists" and "already exists" in body["error"]
+    assert client.call("POST", "/api/record/stop")[1]["code"] == "not_recording"
+
+
+def test_creating_a_template_never_overwrites_an_existing_one(served):
+    app, client = served
+    client.call("PUT", "/api/templates/주간 회의", {"body": "## 원래\n"})
+    status, body, _ = client.call("PUT", "/api/templates/주간 회의", {"body": "## 새것\n"})
+    assert status == 400 and body["code"] == "template_exists"
+    assert app.templates.get("주간 회의").body == "## 원래\n"
+    # editing it (previous = its name) still works
+    assert (
+        client.call(
+            "PUT", "/api/templates/주간 회의", {"body": "## 수정\n", "previous": "주간 회의"}
+        )[0]
+        == 200
+    )
