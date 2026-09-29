@@ -562,7 +562,8 @@ kbd {
 .md ol > li::marker { color: var(--ink-3); font-weight: 600; font-size: 0.9em; font-variant-numeric: tabular-nums; }
 .md li { margin: 3px 0; }
 .md li > p { margin: 4px 0; color: var(--ink-2); }
-.md li.task { list-style: none; display: flex; gap: 9px; align-items: flex-start; }
+.md li.task { list-style: none; display: flex; flex-wrap: wrap; gap: 0 9px; align-items: flex-start; }
+.md li.task > ul, .md li.task > ol, .md li.task > p { flex-basis: 100%; margin-left: 22px; }
 .md li.task::before { display: none; }
 .md li.task input { margin-top: 5px; accent-color: var(--ink); }
 .md li.task.done > span { color: var(--ink-3); text-decoration: line-through; }

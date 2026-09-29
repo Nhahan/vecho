@@ -52,6 +52,7 @@ const T = KO ? {
   tplBodyPh: "## 1. 현황\n\n- **지원 현황**\n- **면접**\n\n## 2. 이번 주 숙제\n\n1. ",
   outline: "요약에 들어갈 섹션", noSections: "# 로 시작하는 제목 줄이 있어야 합니다.",
   tplHint: "<b>예시 내용이 들어 있어도 괜찮습니다.</b> 제목·굵은 항목 이름·표의 열 같은 구조만 따르고, 예시의 사실은 옮겨 적지 않습니다. 대화에서 채울 수 없는 항목은 비워 둡니다. 섹션 제목은 그대로 쓰이므로 날짜처럼 매번 바뀌는 내용은 제목에서 빼 두세요. 들여 쓴 소제목은 대화에 해당 내용이 있을 때만 들어갑니다.",
+  discardTitle: "저장하지 않은 템플릿이 있습니다", discardBody: "이 화면을 떠나면 편집한 내용이 사라집니다.", discard: "버리고 이동",
   save: "저장", tplSaved: "템플릿을 저장했습니다", tplDeleted: "템플릿을 삭제했습니다",
   tplDelTitle: "이 템플릿을 삭제할까요?", tplDelBody: "이미 만든 요약은 그대로 남습니다.",
   summarizeWith: "이 템플릿으로 다시 요약", manageTemplates: "템플릿 관리…", back: "돌아가기",
@@ -100,6 +101,7 @@ const T = KO ? {
   tplBodyPh: "## 1. Status\n\n- **Applications**\n- **Interviews**\n\n## 2. Homework\n\n1. ",
   outline: "Sections of the summary", noSections: "Add at least one heading line starting with #.",
   tplHint: "<b>Example content is fine.</b> Only the structure is used — headings, bold labels, table columns. The example's facts are never copied, and sections the conversation doesn't cover stay empty. Headings are kept verbatim, so leave things like dates out of them. Indented sub-headings appear only when the conversation has something for them.",
+  discardTitle: "Discard your template changes?", discardBody: "Leaving this page loses what you typed.", discard: "Discard",
   save: "Save", tplSaved: "Template saved", tplDeleted: "Template deleted",
   tplDelTitle: "Delete this template?", tplDelBody: "Summaries already made with it stay as they are.",
   summarizeWith: "Summarize again with this template", manageTemplates: "Manage templates…", back: "Back",
@@ -236,6 +238,20 @@ function renderSummary(md, id) {
 
 /* ================================================================ markdown (template summaries) */
 
+// Split a table row on "|", except inside `code` or after a backslash.
+function splitCells(row) {
+  const cells = [""];
+  let code = false;
+  for (let k = 0; k < row.length; k++) {
+    const c = row[k];
+    if (c === "\\" && row[k + 1] === "|") { cells[cells.length - 1] += "|"; k++; continue; }
+    if (c === "`") code = !code;
+    if (c === "|" && !code) { cells.push(""); continue; }
+    cells[cells.length - 1] += c;
+  }
+  return cells.map((c) => c.trim());
+}
+
 function mdInline(text) {
   return esc(text)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
@@ -311,13 +327,13 @@ function renderMarkdown(md, id) {
     }
     const heading = trimmed.match(/^(#{1,6})\s+(.*?)\s*#*$/);
     if (heading) {
-      const level = Math.min(4, Math.max(2, heading[1].length));
-      out.push({ heading: level, html: `<h${level}>${mdInline(heading[2])}</h${level}>` });
+      const tag = Math.min(4, Math.max(2, heading[1].length));  // the page title is the only h1
+      out.push({ heading: heading[1].length, html: `<h${tag}>${mdInline(heading[2])}</h${tag}>` });
       i++; continue;
     }
     if (/^([-*_])(\s*\1){2,}$/.test(trimmed)) { out.push("<hr>"); i++; continue; }
     if (isTable(i)) {
-      const cells = (l) => l.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+      const cells = (l) => splitCells(l.trim().replace(/^\|/, "").replace(/\|$/, ""));
       const head = cells(lines[i]);
       i += 2;
       const rows = [];
@@ -334,9 +350,11 @@ function renderMarkdown(md, id) {
       continue;
     }
     if (LIST.test(line)) { const [html, next] = renderList(i); if (html.replace(/<\/?(ul|ol)>/g, "")) out.push(html); i = next; continue; }
-    const para = [];
+    // A paragraph: this line (whatever it starts with, since nothing above claimed it) and the
+    // plain lines that follow.
+    const para = [lines[i++].trim()];
     while (i < lines.length && lines[i].trim() && !LIST.test(lines[i]) && !/^\s*(#|>|```|\|)/.test(lines[i])) para.push(lines[i++].trim());
-    if (para.length) out.push(`<p>${para.map(mdInline).join("<br>")}</p>`); else i++;
+    out.push(`<p>${para.map(mdInline).join("<br>")}</p>`);
   }
 
   // Sections with nothing in them keep their heading and show a quiet dash.
@@ -362,7 +380,8 @@ let tab = saved.get("tab", "summary");
 let health = null;
 let jobSignature = "";
 let templateData = { default: "", templates: [] };
-let page = null;  // null (home or a session) | "templates" | {edit: name|null}
+let page = null;
+let editorDirty = false;  // null (home or a session) | "templates" | {edit: name|null}
 
 /* ================================================================ list */
 
@@ -406,13 +425,21 @@ $("list").addEventListener("click", (e) => { const item = e.target.closest(".ite
 $("search").addEventListener("input", renderList);
 $("homeLink").addEventListener("click", (e) => { e.preventDefault(); select(null); });
 
-async function select(id, { keepScroll = false } = {}) {
+async function select(id, { keepScroll = false, auto = false } = {}) {
+  if (editorDirty) {
+    if (auto) { renderList(); return; }  // e.g. a recording stopped: never discard a draft
+    if (!(await confirmDialog(T.discardTitle, T.discardBody, T.discard))) return;
+    editorDirty = false;
+  }
   if (id !== selected) closeMenu();
   page = null;
   selected = id; saved.set("selected", id); renderList();
   if (!id) { detail = null; render(); return; }
-  try { detail = await api("sessions/" + encodeURIComponent(id)); }
-  catch { selected = null; saved.set("selected", null); detail = null; }
+  let fresh = null;
+  try { fresh = await api("sessions/" + encodeURIComponent(id)); }
+  catch { if (id === selected) { selected = null; saved.set("selected", null); } }
+  if (id !== selected || page) return;  // the user moved on while this was loading
+  detail = fresh;
   render({ keepScroll, newSession: true });
 }
 
@@ -492,7 +519,7 @@ async function stopRecording() {
     const result = await api("record/stop", { method: "POST" });
     state.recording = null; renderRecorder();
     await refreshList();
-    await select(result.session_id);
+    await select(result.session_id, { auto: true });
   } catch (e) { toast(e.message, true); }
   finally { done(); }
 }
@@ -514,7 +541,7 @@ $("liveTitle").addEventListener("blur", saveLiveTitle);
 $("liveTitle").addEventListener("keydown", (e) => { if (e.key === "Enter") e.target.blur(); });
 $("withRemote").checked = saved.get("withRemote", true);
 $("withRemote").addEventListener("change", () => saved.set("withRemote", $("withRemote").checked));
-window.addEventListener("beforeunload", (e) => { if (state.recording) { e.preventDefault(); e.returnValue = T.leave; } });
+window.addEventListener("beforeunload", (e) => { if (state.recording || editorDirty) { e.preventDefault(); e.returnValue = T.leave; } });
 
 /* ================================================================ issues */
 
@@ -621,7 +648,7 @@ function renderSession(opts) {
 
   let body = "";
   if (tab === "summary") {
-    body = d.summary ? (isCustomTemplate(d.template) ? `<div class="md">${renderMarkdown(d.summary, d.id)}</div>` : renderSummary(d.summary, d.id))
+    body = d.summary ? (d.template_summary ? `<div class="md">${renderMarkdown(d.summary, d.id)}</div>` : renderSummary(d.summary, d.id))
       : working ? "" : `<p class="empty-doc">${esc(d.status === "empty" ? T.noSpeech : T.noSummary)}</p>`;
   } else {
     body = d.segments.length
@@ -651,32 +678,35 @@ function renderSession(opts) {
   const hasAudio = d.tracks.length > 0 && !recording;
   $("player").hidden = !hasAudio;
   if (hasAudio) loadAudio(d, opts.newSession);
+  else stopAudio();
   highlightTurn();
 }
 
 function bindTitle(d) {
   const title = $("title");
+  const current = () => (detail && detail.id === d.id ? detail.title : d.title);
   title.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); title.blur(); }
-    if (e.key === "Escape") { title.textContent = d.title; title.blur(); }
+    if (e.key === "Escape") { title.textContent = current(); title.blur(); }
   });
   title.addEventListener("blur", async () => {
     const value = title.textContent.replace(/\s+/g, " ").trim();
-    if (!value || value === d.title) { title.textContent = d.title; return; }
+    if (!value || value === current()) { title.textContent = current(); return; }
     try {
-      detail = await api("sessions/" + encodeURIComponent(d.id), { method: "PATCH", body: { title: value } });
+      const fresh = await api("sessions/" + encodeURIComponent(d.id), { method: "PATCH", body: { title: value } });
+      if (detail && detail.id === d.id) detail = fresh;
       toast(T.saved); refreshList();
-    } catch (e) { toast(e.message, true); title.textContent = d.title; }
+    } catch (e) { toast(e.message, true); title.textContent = current(); }
   });
 }
 
 function updateTopbarRule() { $("topbar").classList.toggle("scrolled", $("main").scrollTop > 4); }
 $("main").addEventListener("scroll", updateTopbarRule, { passive: true });
 
+function forgetChecks(id) { try { localStorage.removeItem("vecho:checks:" + id); } catch { /* private mode */ } }
+
 /* ================================================================ templates */
 
-const builtinName = () => (templateData.templates.find((t) => t.builtin) || {}).name;
-const isCustomTemplate = (name) => !!name && name !== builtinName() && templateData.templates.some((t) => t.name === name && !t.builtin);
 
 async function loadTemplates() {
   try { templateData = await api("templates"); } catch { return; }
@@ -692,7 +722,9 @@ $("templatesBtn").title = T.templatesTip;
 $("templatesBtn").setAttribute("aria-label", T.templatesTip);
 $("templatesBtn").addEventListener("click", () => openTemplates());
 
-function openTemplates() {
+async function openTemplates() {
+  if (editorDirty && !(await confirmDialog(T.discardTitle, T.discardBody, T.discard))) return;
+  editorDirty = false;
   closeMenu(); stopAudio();
   page = "templates"; selected = null; detail = null; saved.set("selected", null);
   renderList(); render({ newSession: true });
@@ -755,14 +787,17 @@ function renderTemplateEditor(name) {
       ? sections.map(([level, text]) => `<li class="l${Math.min(4, level - top + 2)}">${esc(text)}</li>`).join("")
       : `<li class="none">${esc(T.noSections)}</li>`;
   };
-  $("tplBody").addEventListener("input", updateOutline);
+  $("tplBody").addEventListener("input", () => { editorDirty = true; updateOutline(); });
+  $("tplName").addEventListener("input", () => { editorDirty = true; });
+  editorDirty = false;
   updateOutline();
-  $("tplCancel").addEventListener("click", () => { page = "templates"; render(); });
+  $("tplCancel").addEventListener("click", () => { editorDirty = false; page = "templates"; render(); });
   $("tplSave").addEventListener("click", async () => {
     const newName = $("tplName").value.trim();
     try {
       templateData = await api(`templates/${encodeURIComponent(newName)}`, { method: "PUT", body: { body: $("tplBody").value, previous: name } });
       await loadTemplates();
+      editorDirty = false;
       toast(T.tplSaved); page = "templates"; render();
     } catch (e) { toast(e.message, true); }
   });
@@ -810,11 +845,13 @@ async function act(name) {
     else if (name === "export") exportMarkdown(d);
     else if (name === "menu") openMenu();
     else if (name === "tplmenu") openTemplateMenu();
-    else if (name === "resummarize") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "summarize" } }); render({ keepScroll: true }); refreshList(); }
-    else if (name === "retry") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "all" } }); render({ keepScroll: true }); refreshList(); }
+    else if (name === "resummarize" || name === "retry") forgetChecks(d.id);
+    if (name === "resummarize") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "summarize" } }); render({ keepScroll: true }); refreshList(); }
+    if (name === "retry") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "all" } }); render({ keepScroll: true }); refreshList(); }
     else if (name === "delete") {
       if (!(await confirmDialog(T.delTitle, T.delBody, T.confirmDel))) return;
       await api(`sessions/${id}`, { method: "DELETE" });
+      forgetChecks(d.id);
       stopAudio(); toast(T.deleted);
       await refreshList();
       select(sessions.length ? sessions[0].id : null);
@@ -863,6 +900,7 @@ $("menu").addEventListener("click", async (e) => {
   const choice = e.target.closest("[data-template]");
   if (choice && detail) {
     closeMenu();
+    forgetChecks(detail.id);
     const step = detail.segments.length ? "summarize" : "all";
     try {
       detail = await api(`sessions/${encodeURIComponent(detail.id)}/process`, { method: "POST", body: { step, template: choice.dataset.template } });
@@ -927,15 +965,21 @@ function loadAudio(d, fresh) {
   drawTimeline();
   updatePlayer();
 }
-function stopAudio() { audio.pause(); audio.removeAttribute("src"); audio.dataset.src = ""; audio.load(); }
+function stopAudio() {
+  if (!audio.dataset.src) return;
+  audio.pause(); audio.removeAttribute("src"); audio.dataset.src = ""; audio.load();
+}
 function totalTime() { return audio.duration && isFinite(audio.duration) ? audio.duration : (detail && detail.duration) || 0; }
 
 function drawTimeline() {
   const canvas = $("timelineCanvas");
   const dpr = window.devicePixelRatio || 1, w = canvas.clientWidth, h = canvas.clientHeight;
   if (!w || !detail) return;
-  canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+    canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr);
+  }
   const ctx = canvas.getContext("2d");
+  const colors = { me: cssVar("--me"), remote: cssVar("--them"), other: cssVar("--ink-3") };
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
   const total = totalTime(), now = audio.currentTime || 0;
@@ -945,7 +989,7 @@ function drawTimeline() {
   if (total) {
     for (const s of detail.segments) {
       const x = (s.start / total) * w, x2 = (s.end / total) * w;
-      ctx.fillStyle = cssVar(s.role === "me" ? "--me" : s.role === "remote" ? "--them" : "--ink-3");
+      ctx.fillStyle = colors[s.role] || colors.other;
       ctx.globalAlpha = s.end <= now ? 1 : 0.38;
       ctx.beginPath();
       ctx.roundRect(x, lanes[s.role] ?? lanes.mixed, Math.max(2, x2 - x), 5, 2.5);
@@ -1011,7 +1055,7 @@ async function importFile(file) {
   try {
     const result = await api("import", { method: "POST", body: file, headers: { "X-Filename": encodeURIComponent(file.name), "X-Template": encodeURIComponent($("templateSelect").value || ""), "Content-Type": "application/octet-stream" } });
     toast(T.imported);
-    await refreshList(); select(result.session_id);
+    await refreshList(); select(result.session_id, { auto: true });
   } catch (e) { toast(e.message, true); }
 }
 $("importBtn").addEventListener("click", () => $("fileInput").click());
@@ -1032,7 +1076,7 @@ async function checkHealth() {
   const failing = health.filter((c) => c.status !== "ok").length;
   $("healthDot").className = "status-dot " + (health.length && !failing ? "ok" : "warn");
   $("healthText").textContent = health.length && !failing ? T.ready : T.notReady(failing || 1);
-  if (!detail) renderHome();
+  if (!detail && !page) renderHome();
 }
 $("healthBtn").addEventListener("click", () => { select(null); });
 
@@ -1040,8 +1084,9 @@ $("healthBtn").addEventListener("click", () => { select(null); });
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeMenu();
-  const typing = e.target.closest("input, textarea, [contenteditable]");
+  const typing = e.target.closest("input, textarea, select, [contenteditable], #menu");
   if (typing || e.metaKey || e.ctrlKey || e.altKey || $("dialog").open) return;
+  if (e.key === " " && e.target.closest("button, a, [role=slider]")) return;  // let Space press it
   if (e.key === "/") { e.preventDefault(); $("search").focus(); }
   else if (e.key === "r" || e.key === "R") { e.preventDefault(); state.recording ? stopRecording() : startRecording(); }
   else if (e.key === " " && !$("player").hidden) { e.preventDefault(); $("playBtn").click(); }
@@ -1058,12 +1103,17 @@ async function poll() {
     if ($("homeStart")) $("homeStart").hidden = !!state.recording;
     const jobs = Object.values(state.jobs);
     const signature = JSON.stringify(jobs.map((j) => [j.session_id, j.stage, Math.round(j.progress * 25)]));
-    if (signature !== jobSignature) {
+    const editingTitle = document.activeElement && document.activeElement.id === "title";
+    if (signature !== jobSignature && !editingTitle) {  // retried after the title loses focus
       const finished = jobs.filter((j) => j.stage === "done" && !jobSignature.includes(`"${j.session_id}","done"`));
       jobSignature = signature;
       await refreshList();
-      if (selected && !page) {
-        try { detail = await api("sessions/" + encodeURIComponent(selected)); render({ keepScroll: true }); } catch { /* deleted elsewhere */ }
+      const sid = selected;
+      if (sid && !page) {
+        try {
+          const fresh = await api("sessions/" + encodeURIComponent(sid));
+          if (sid === selected && !page) { detail = fresh; render({ keepScroll: true }); }
+        } catch { /* deleted elsewhere */ }
       }
       if (finished.length && document.hidden && "Notification" in window && Notification.permission === "granted") {
         new Notification("vecho", { body: `${T.summary} ✓` });
