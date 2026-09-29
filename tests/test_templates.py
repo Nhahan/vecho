@@ -214,3 +214,85 @@ def test_example_subheadings_filled_only_with_fillers_disappear():
 """
     result = conform(drop_placeholders(answer), EXAMPLE)
     assert "공부 ≠ 취업 준비" not in result and "도메인은 하나로" in result
+
+
+# ---- regressions found in review --------------------------------------------------------
+
+
+def test_text_before_the_first_heading_is_kept():
+    result = conform(
+        "Intro with real facts.\n# Meeting notes\nimportant stuff\n## A\nx\n", "## A\n## B"
+    )
+    assert "Intro with real facts." in result and "important stuff" in result
+    assert result.index("## A") < result.index("## B")
+
+
+def test_fenced_answer_after_a_short_intro():
+    answer = "Here you go:\n```markdown\n## A\n- fact\n```\n"
+    assert strip_fences(answer) == "## A\n- fact"
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "- 기록이 없는 거래 3건 발견",
+        "- 보고서 내용이 부족하다는 피드백",
+        "- Pricing not discussed; revisit Monday",
+        "- Vendor sent no details yet",
+        "- 과제는 아직 받은 것 없음",
+    ],
+)
+def test_real_facts_are_not_mistaken_for_fillers(line):
+    assert drop_placeholders(line) == line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "- 없음",
+        "- (전사 기록에 해당 정보 없음)",
+        "- 관련 내용 없음",
+        "- Not mentioned in the transcript",
+        "- N/A",
+    ],
+)
+def test_whole_value_fillers_are_removed(line):
+    assert drop_placeholders(line) == ""
+
+
+def test_table_header_rows_survive_copy_removal():
+    template = (
+        "## People\n\n| Name | Role | Notes |\n|---|---|---|\n| Kim | Designer | example row |\n"
+    )
+    answer = (
+        "## People\n\n| Name | Role | Notes |\n|---|---|---|\n"
+        "| Lee | PM | new hire |\n| Kim | Designer | example row |\n"
+    )
+    cleaned = remove_copied(answer, template)
+    assert "| Name | Role | Notes |" in cleaned and "| Lee | PM | new hire |" in cleaned
+    assert "example row" not in cleaned
+
+
+def test_repeated_sub_headings_keep_their_own_section():
+    template = "## A\n### Details\n## B\n### Details\n"
+    result = conform("## A\nfoo\n## B\n### Details\nB-detail\n", template)
+    assert result.index("B-detail") > result.index("## B")
+
+
+def test_names_differing_only_by_case_are_one_template(tmp_path):
+    store = TemplateStore(tmp_path)
+    store.save("Weekly", "## A\n")
+    with pytest.raises(TemplateError, match="already exists"):
+        store.save("weekly", "## B\n")
+    assert store.get("WEEKLY").builtin  # no accidental match on a case-insensitive disk
+    store.save("weekly", "## B\n", previous="Weekly")  # a rename that only changes case
+    assert [t.name for t in store.list()][1:] == ["weekly"]
+    assert store.get("weekly").body == "## B\n"
+
+
+def test_rename_keeps_the_default(tmp_path):
+    store = TemplateStore(tmp_path)
+    store.save("old", "## A\n")
+    store.set_default("old")
+    store.save("new", "## A\n", previous="old")
+    assert store.default_name() == "new" and [t.name for t in store.list()][1:] == ["new"]

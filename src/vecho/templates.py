@@ -11,8 +11,10 @@ summary) always exists and cannot be changed.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import tempfile
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +62,19 @@ def _name_of(path: Path) -> str:
     return urllib.parse.unquote(path.stem)
 
 
+def write_text_atomic(path: Path, text: str) -> None:
+    """Write via a unique temporary file, so concurrent writers never share one."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 class TemplateStore:
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -78,34 +93,45 @@ class TemplateStore:
         return [Template(BUILTIN_NAME, "", builtin=True), *found]
 
     def get(self, name: str | None) -> Template:
-        """The named template; the built-in one for ``None`` or an unknown name."""
-        if name and name != BUILTIN_NAME:
-            try:
-                path = self._path(name)
-            except TemplateError:
-                path = None
-            if path is not None and path.is_file():
-                return Template(_check_name(name), path.read_text("utf-8"))
+        """The template with exactly this name; the built-in one for ``None`` or an unknown name.
+
+        Matching goes through the listing rather than the file system, which may ignore case.
+        """
+        wanted = " ".join((name or "").split())
+        if wanted and wanted != BUILTIN_NAME:
+            for template in self.list()[1:]:
+                if template.name == wanted:
+                    return template
         return Template(BUILTIN_NAME, "", builtin=True)
 
-    def save(self, name: str, body: str) -> Template:
+    def save(self, name: str, body: str, previous: str | None = None) -> Template:
+        """Create or update a template; ``previous`` renames an existing one."""
+        name = _check_name(name)
         body = body.strip()
         if not headings(body):
             raise TemplateError("a template needs at least one heading (a line starting with #)")
         if len(body) > MAX_TEMPLATE_CHARS:
             raise TemplateError(f"a template can have at most {MAX_TEMPLATE_CHARS} characters")
-        path = self._path(name)
+        existing = {t.name.casefold(): t.name for t in self.list()[1:]}
+        clash = existing.get(name.casefold())
+        if clash is not None and clash != name and clash != previous:
+            raise TemplateError(f"a template named '{clash}' already exists")
+        if clash is None and name.casefold() == BUILTIN_NAME.casefold():
+            raise TemplateError(f"'{BUILTIN_NAME}' is the built-in template; choose another name")
         self.root.mkdir(parents=True, exist_ok=True)
-        partial = path.with_name(f".{path.name}.tmp")
-        partial.write_text(body + "\n", encoding="utf-8")
-        os.replace(partial, path)
-        return Template(_name_of(path), body + "\n")
+        was_default = previous is not None and self.default_name() == previous
+        if previous and previous != name and self.get(previous).name == previous:
+            self._path(previous).unlink()  # also covers renames that only change letter case
+        path = self._path(name)
+        write_text_atomic(path, body + "\n")
+        if was_default:
+            self.set_default(name)
+        return Template(name, body + "\n")
 
     def delete(self, name: str) -> None:
-        path = self._path(name)
-        if not path.is_file():
+        if self.get(name).name != name:
             raise TemplateError(f"no template named '{name}'")
-        path.unlink()
+        self._path(name).unlink()
         if self.default_name() == name:
             self.set_default(BUILTIN_NAME)
 
@@ -121,7 +147,7 @@ class TemplateStore:
         if template.name != " ".join(name.split()):
             raise TemplateError(f"no template named '{name}'")
         self.root.mkdir(parents=True, exist_ok=True)
-        (self.root / _DEFAULT_FILE).write_text(template.name, encoding="utf-8")
+        write_text_atomic(self.root / _DEFAULT_FILE, template.name)
         return template.name
 
 
@@ -166,11 +192,27 @@ def _is_structure(line: str) -> bool:
     return bool(re.fullmatch(r"[-*]?\s*\*\*[^*]+\*\*\s*:?", stripped))
 
 
+_DIVIDER = re.compile(r"\|?[\s:|-]+\|?")
+
+
+def _header_rows(lines: list[str]) -> set[int]:
+    """Indexes of table header rows (the row right above a divider): structure, not content."""
+    return {
+        i
+        for i in range(len(lines) - 1)
+        if lines[i].strip().startswith("|")
+        and "-" in lines[i + 1]
+        and _DIVIDER.fullmatch(lines[i + 1].strip())
+    }
+
+
 def example_lines(body: str) -> set[str]:
     """Normalized example sentences of a template, for spotting copies in a summary."""
     found = set()
-    for line in body.splitlines():
-        if _is_structure(line):
+    lines = body.splitlines()
+    headers = _header_rows(lines)
+    for index, line in enumerate(lines):
+        if index in headers or _is_structure(line):
             continue
         text = re.sub(r"^\s*(?:[-*>]|\d+\.)\s*", "", line)
         text = re.sub(r"\*\*[^*]+\*\*\s*:?", "", text)  # keep the label out of the comparison
@@ -186,8 +228,10 @@ def remove_copied(summary: str, body: str) -> str:
     if not examples:
         return summary
     kept = []
-    for line in summary.splitlines():
-        if _is_structure(line):
+    lines = summary.splitlines()
+    headers = _header_rows(lines)
+    for index, line in enumerate(lines):
+        if index in headers or _is_structure(line):
             kept.append(line)
             continue
         text = re.sub(r"^\s*(?:[-*>]|\d+\.)\s*", "", line)
@@ -202,11 +246,14 @@ def remove_copied(summary: str, body: str) -> str:
 
 
 # "Nothing to say" fillers models write even when told to leave a field empty.
+# The *whole* value must be one of these; a sentence that merely contains "없음" is content.
 _PLACEHOLDER = re.compile(
-    r"^(?:없음|없다|없습니다|해당\s*없음|미정|미확인|미언급|n/?a|none|nothing|tbd|unknown|not\s+mentioned|"
-    r"no\s+information|[-–—?]+)$"
-    r"|(?:정보|내용|언급|기록|해당\s*사항|자료|논의)\s*(?:이|가|은|는)?\s*(?:없|부족|확인\s*(?:되지|불가))"
-    r"|(?:not|never)\s+(?:mentioned|discussed|covered|stated)|no\s+(?:information|mention|details)",
+    r"(?:없음|없다|없습니다|해당\s*없음|미정|미확인|미언급|n/?a|none|nothing|tbd|unknown|[-–—?]+)"
+    r"|(?:(?:이\s*)?(?:전사|대화|녹음|회의)\s*(?:기록|내용|중)?\s*(?:에서|에는|에|상)?\s*)?"
+    r"(?:해당\s*|관련\s*|언급된\s*)?(?:정보|내용|언급|기록|사항|자료|논의)\s*(?:이|가|은|는)?\s*"
+    r"(?:없음|없습니다|없다|없었음|없었습니다|부족|확인\s*(?:불가|되지\s*않음))"
+    r"|(?:not\s+(?:mentioned|discussed|covered|stated)|no\s+(?:information|mention|details)"
+    r"(?:\s+(?:given|provided|available))?)(?:\s+in\s+the\s+(?:transcript|conversation|recording))?",
     re.IGNORECASE,
 )
 _PREFIX = re.compile(r"^(\s*(?:[-*+]|\d+[.)]|>)?\s*)")
@@ -215,7 +262,7 @@ _LABEL = re.compile(r"\*\*[^*]+\*\*\s*:?\s*")
 
 def _is_placeholder(text: str) -> bool:
     text = re.sub(r"\*\*|__|`", "", text).strip().strip("()[]{}（）「」.。,·:;").strip()
-    return bool(text) and len(text) <= 40 and bool(_PLACEHOLDER.search(text))
+    return bool(text) and len(text) <= 40 and bool(_PLACEHOLDER.fullmatch(text))
 
 
 def drop_placeholders(summary: str) -> str:
@@ -285,13 +332,21 @@ def conform(summary: str, body: str) -> str:
     for heading_line, lines in sections:
         match = _HEADING.match(heading_line)
         key = _norm(match.group(2)) if match else ""
-        index = keys.index(key) if key in keys else -1
+        # the first unused template heading with this text, looking forward first (templates
+        # may repeat a sub-heading such as "### Details" under several sections)
+        order = [*range(current + 1, len(keys)), *range(0, current + 1)]
+        index = next((i for i in order if keys[i] == key and i not in own), -1)
         if index == -1:
             # fuzzy: a template heading contained in the model's heading or vice versa
             index = next(
-                (i for i, k in enumerate(keys) if k and key and (k in key or key in k)), -1
+                (
+                    i
+                    for i in order
+                    if keys[i] and key and i not in own and (keys[i] in key or key in keys[i])
+                ),
+                -1,
             )
-        if index >= 0 and index not in own:
+        if index >= 0:
             current = index
             own[current] = lines
         elif current >= 0:
@@ -307,6 +362,9 @@ def conform(summary: str, body: str) -> str:
         return lines
 
     out: list[str] = []
+    lead = trimmed([line for line in preamble if not line.strip().startswith("```")])
+    if lead:  # text the model wrote before the first template heading is kept, not lost
+        out += [*lead, ""]
     for index, (level, text) in enumerate(wanted):
         content = trimmed(own.get(index, []))
         added = trimmed(extra.get(index, []))
@@ -322,6 +380,8 @@ def conform(summary: str, body: str) -> str:
 
 
 def strip_fences(text: str) -> str:
-    """Models sometimes wrap the whole answer in a ```markdown block."""
-    match = re.fullmatch(r"\s*```(?:markdown|md)?\s*\n(.*?)\n```\s*", text, re.DOTALL)
-    return match.group(1) if match else text
+    """Models sometimes wrap the answer in a ```markdown block, maybe after a short intro."""
+    match = re.search(r"```(?:markdown|md)?[ \t]*\n(.*)\n```", text, re.DOTALL)
+    if match and match.group(1).count("\n```") == 0 and headings(match.group(1)):
+        return match.group(1)
+    return text
