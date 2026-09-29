@@ -12,6 +12,7 @@ import mimetypes
 import re
 import secrets
 import shutil
+import sys
 import threading
 import urllib.parse
 import wave
@@ -649,3 +650,9 @@ class VechoHTTPServer(ThreadingHTTPServer):
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.server_address[1]}/"
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """A browser closing a connection early is normal; keep the log for real errors."""
+        if isinstance(sys.exc_info()[1], (ConnectionResetError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)

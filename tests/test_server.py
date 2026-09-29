@@ -545,3 +545,17 @@ def test_preview_is_plain_text_for_template_summaries():
     md = "# t\n\n> meta\n\n## 1. 현황\n\n- **지원 현황**\n    - 원티드 **150개** 지원\n"
     assert tldr_of(md) == "원티드 150개 지원"
     assert tldr_of("# t\n\n> m\n\n## A\n\n| a | b |\n| --- | --- |\n\n---\n") == ""
+
+
+def test_clients_dropping_connections_are_not_logged(served, capsys):
+    import socket
+
+    app, client = served
+    host, port = client.base.replace("http://", "").split(":")
+    for _ in range(3):
+        with socket.create_connection((host, int(port))) as sock:
+            sock.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00"
+            )
+    time.sleep(0.3)
+    assert "Traceback" not in capsys.readouterr().err
