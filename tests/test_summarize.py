@@ -216,3 +216,69 @@ def test_other_languages_get_english_headings_and_translation_request():
     assert "## Action items" in template
     assert "translating the headings" in template and "Japanese" in template
     assert "do not add a second" in template
+
+
+# ---- templates ------------------------------------------------------------------------------
+
+TEMPLATE_BODY = """## 1. 현황
+
+- **지원 현황**
+    - 사람인 628개 지원
+
+## 2. 숙제
+
+1. 이력서 완성
+
+## 3. 다짐
+
+-
+"""
+
+
+def test_custom_template_is_filled_conformed_and_cleaned(ollama):
+    from vecho.templates import Template
+
+    ollama.replies = [
+        "```markdown\n## 2. 숙제\n\n1. 금요일까지 이력서 수정\n\n## 1. 현황\n\n- **지원 현황**\n"
+        "    - 사람인 628개 지원\n    - 원티드 150개\n```"
+    ]
+    result = summarize_lines(
+        ["[00:00:01] 상대방: 원티드로 150개 넣었어요"],
+        client_for(ollama),
+        "Korean",
+        10000,
+        template=Template("멘토링", TEMPLATE_BODY),
+    )
+    prompt = ollama.requests[0]["messages"][1]["content"]
+    assert "Never copy it" in prompt and "사람인 628개" in prompt  # template sent as an example
+    assert "628" not in result  # copied example fact removed
+    assert result.index("## 1. 현황") < result.index("## 2. 숙제") < result.index("## 3. 다짐")
+    assert "원티드 150개" in result and "금요일까지 이력서 수정" in result
+
+
+def test_builtin_template_keeps_the_standard_summary(ollama):
+    from vecho.templates import BUILTIN_NAME, Template
+
+    summarize_lines(
+        ["[00:00:01] 나: hi"],
+        client_for(ollama),
+        "Korean",
+        1000,
+        template=Template(BUILTIN_NAME, "", builtin=True),
+    )
+    assert "## 한 줄 요약" in ollama.requests[0]["messages"][1]["content"]
+
+
+def test_summarize_session_uses_the_sessions_template(tmp_path, config, ollama):
+    from vecho.templates import TemplateStore
+
+    TemplateStore(config.templates_dir).save("멘토링", TEMPLATE_BODY)
+    session = SessionStore(tmp_path).create("x")
+    session.meta.template = "멘토링"
+    transcript.save_segments(
+        session.path_for("transcript.json"), [Segment(0, 1, "me", "hi")], "ko", "t"
+    )
+    ollama.replies = ["## 1. 현황\n\n- **지원 현황**\n    - 없음 확인"]
+    markdown = summarize_session(session, config, client_for(ollama))
+    assert "## 3. 다짐" in markdown and "· 멘토링" in markdown
+    assert session.meta.template == "멘토링"

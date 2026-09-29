@@ -13,7 +13,7 @@ import threading
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
-from . import __version__, audio, recording, roles, systemaudio
+from . import __version__, audio, recording, roles, systemaudio, templates
 from .config import Config, load_config
 from .errors import SessionError, VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_MD, Session, SessionStore
@@ -78,7 +78,11 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
         remote=args.remote,
         mic_only=args.mic_only,
     )
+    template = _template_arg(args, config)
     live.start()
+    if template:
+        live.session.meta.template = template
+        live.session.save()
     try:
         _eprint(f"Recording to {live.session.dir}")
         for role, source in live.sources:
@@ -124,13 +128,23 @@ def _run_transcribe(session: Session, config: Config) -> None:
         _eprint("warning: no speech was detected.")
 
 
-def _run_summarize(session: Session, config: Config) -> str:
+def _template_arg(args: argparse.Namespace, config: Config) -> str | None:
+    """The ``--template`` name, checked to exist."""
+    name = getattr(args, "template", None)
+    if not name:
+        return None
+    if templates.TemplateStore(config.templates_dir).get(name).name != name:
+        raise SessionError(f"no template named '{name}'; see `vecho templates`")
+    return name
+
+
+def _run_summarize(session: Session, config: Config, template: str | None = None) -> str:
     _eprint(f"Summarizing with {config.llm_model}...")
 
     def report(stage: str, step: int, total: int) -> None:
         _eprint(f"  {stage}: {step}/{total}")
 
-    markdown = summarize_session(session, config, on_progress=report)
+    markdown = summarize_session(session, config, on_progress=report, template=template)
     _eprint(f"Summary -> {session.path_for(SUMMARY_MD)}")
     return markdown
 
@@ -171,8 +185,9 @@ def cmd_transcribe(args: argparse.Namespace, config: Config) -> int:
 
 def cmd_summarize(args: argparse.Namespace, config: Config) -> int:
     config = _overrides(config, args)
+    template = _template_arg(args, config)
     session = SessionStore(config.sessions_dir).resolve(args.session)
-    print(_run_summarize(session, config))
+    print(_run_summarize(session, config, template))
     return 0
 
 
@@ -190,8 +205,10 @@ def cmd_import(args: argparse.Namespace, config: Config) -> int:
         if not path.is_file():
             raise SessionError(f"audio file not found: {path}")
 
+    template = _template_arg(args, config)
     title = args.title or next(iter(sources.values())).stem
     session = SessionStore(config.sessions_dir).create(title)
+    session.meta.template = template
     for role, path in sources.items():
         name = f"{role}{path.suffix.lower()}"
         shutil.copy2(path, session.path_for(name))
@@ -326,6 +343,7 @@ def _add_transcribe_options(parser: argparse.ArgumentParser) -> None:
 
 def _add_summarize_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--llm-model", help="Ollama model used for the summary")
+    parser.add_argument("--template", help="summary template name (see `vecho templates`)")
     parser.add_argument("--summary-language", help="language of the summary (default: Korean)")
 
 
@@ -335,6 +353,48 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--no-process", action="store_true", help="only save audio; skip transcription and summary"
     )
+
+
+def cmd_templates(args: argparse.Namespace, config: Config) -> int:
+    """List, add, show, remove templates or choose the default one."""
+    store = templates.TemplateStore(config.templates_dir)
+    action, name = args.action, args.name
+    if action == "list":
+        default = store.default_name()
+        for template in store.list():
+            mark = "*" if template.name == default else " "
+            kind = (
+                "built-in"
+                if template.builtin
+                else f"{len(templates.headings(template.body))} sections"
+            )
+            print(f"{mark} {template.name}  ({kind})")
+        print("\n* = default. Add one with: vecho templates add NAME FILE")
+        return 0
+    if not name:
+        raise SessionError(f"`vecho templates {action}` needs a template name")
+    if action == "add":
+        if not args.file:
+            raise SessionError("give the Markdown file: vecho templates add NAME FILE")
+        body = Path(args.file).expanduser().read_text(encoding="utf-8")
+        saved = store.save(name, body)
+        names = [text for _, text in templates.headings(saved.body)]
+        more = " …" if len(names) > 6 else ""
+        print(f"Saved '{saved.name}' ({', '.join(names[:6])}{more})")
+    elif action == "show":
+        template = store.get(name)
+        if template.name != name:
+            raise SessionError(f"no template named '{name}'")
+        print(
+            template.body
+            or "(built-in: 한 줄 요약 · 핵심 내용 · 결정 사항 · 액션 아이템 · 미해결 질문)"
+        )
+    elif action == "remove":
+        store.delete(name)
+        print(f"Removed '{name}'.")
+    elif action == "default":
+        print(f"Default template: {store.set_default(name)}")
+    return 0
 
 
 def cmd_app(args: argparse.Namespace, config: Config) -> int:
@@ -388,6 +448,13 @@ def build_parser() -> argparse.ArgumentParser:
     summarize = add("summarize", cmd_summarize, "summarize a transcribed session")
     summarize.add_argument("session", nargs="?", default="latest", help="id, prefix or 'latest'")
     _add_summarize_options(summarize)
+
+    tpl = add("templates", cmd_templates, "manage summary templates")
+    tpl.add_argument(
+        "action", nargs="?", default="list", choices=["list", "add", "show", "remove", "default"]
+    )
+    tpl.add_argument("name", nargs="?", help="template name")
+    tpl.add_argument("file", nargs="?", help="Markdown file (for add)")
 
     add("list", cmd_list, "list recorded sessions")
 

@@ -18,6 +18,7 @@ from . import transcript
 from .config import Config
 from .errors import SummarizationError
 from .session import SUMMARY_MD, TRANSCRIPT_JSON, Session, now_iso, write_atomic
+from .templates import Template, TemplateStore, conform, remove_copied, strip_fences
 
 # (stage, step, total steps)
 ProgressCallback = Callable[[str, int, int], None]
@@ -95,6 +96,42 @@ The notes below were extracted, in order, from consecutive parts of one long con
 Merge them into a single coherent summary and remove duplicates.
 
 {template}
+
+Notes:
+{text}"""
+
+TEMPLATE_RULES = """\
+Write notes about the conversation by filling in the TEMPLATE below.
+
+Rules:
+- Keep every heading of the template with the same text, level and order. Do not add, drop,
+  rename or renumber headings.
+- Inside each section keep the template's shape: bold labels such as "**Label**", tables
+  (same columns), numbered lists and sub-bullets.
+- The template may contain example content from a completely different conversation. It only
+  shows the format and the level of detail. Never copy it: every fact you write must come
+  from the {source} below.
+- Fill in only what the {source} actually supports. When nothing fits a section, a label or
+  a table, leave it empty: keep the heading or label and write nothing after it. Do not write
+  placeholders such as "없음", "N/A", "-" or guesses.
+- Write in {language}. Reply with the filled-in Markdown only, without a code block.
+
+TEMPLATE:
+<<<
+{template}
+>>>"""
+
+FROM_TRANSCRIPT_WITH_TEMPLATE = """\
+{rules}
+
+Transcript:
+{text}"""
+
+FROM_NOTES_WITH_TEMPLATE = """\
+{rules}
+
+The notes below were extracted, in order, from consecutive parts of one long conversation.
+Use them as the source and remove duplicates.
 
 Notes:
 {text}"""
@@ -196,18 +233,33 @@ def summarize_lines(
     language: str,
     chunk_chars: int,
     on_progress: ProgressCallback | None = None,
+    template: Template | None = None,
 ) -> str:
     if not any(line.strip() for line in lines):
         raise SummarizationError("the transcript is empty; there is nothing to summarize")
 
     system = SYSTEM_PROMPT.format(language=language)
-    template = build_template(language)
+    custom = template is not None and not template.builtin and template.body.strip()
     chunks = transcript.split_into_chunks(lines, chunk_chars)
+
+    def final(text: str, from_notes: bool) -> str:
+        if not custom:
+            prompt = FINAL_FROM_NOTES if from_notes else FINAL_FROM_TRANSCRIPT
+            return client.chat(system, prompt.format(template=build_template(language), text=text))
+        assert template is not None
+        rules = TEMPLATE_RULES.format(
+            template=template.body.strip(),
+            language=language,
+            source="notes" if from_notes else "transcript",
+        )
+        prompt = FROM_NOTES_WITH_TEMPLATE if from_notes else FROM_TRANSCRIPT_WITH_TEMPLATE
+        answer = strip_fences(client.chat(system, prompt.format(rules=rules, text=text)))
+        return conform(remove_copied(answer, template.body), template.body)
 
     if len(chunks) == 1:
         if on_progress:
             on_progress("summary", 1, 1)
-        return client.chat(system, FINAL_FROM_TRANSCRIPT.format(template=template, text=chunks[0]))
+        return final(chunks[0], from_notes=False)
 
     notes = []
     for number, chunk in enumerate(chunks, start=1):
@@ -219,7 +271,7 @@ def summarize_lines(
     if on_progress:
         on_progress("summary", len(chunks), len(chunks))
     joined = "\n\n".join(f"### Part {i}\n{note}" for i, note in enumerate(notes, start=1))
-    return client.chat(system, FINAL_FROM_NOTES.format(template=template, text=joined))
+    return final(joined, from_notes=True)
 
 
 def summarize_session(
@@ -227,8 +279,13 @@ def summarize_session(
     config: Config,
     client: OllamaClient | None = None,
     on_progress: ProgressCallback | None = None,
+    template: str | None = None,
 ) -> str:
-    """Summarize a transcribed session into ``summary.md`` and return the Markdown."""
+    """Summarize a transcribed session into ``summary.md`` and return the Markdown.
+
+    The template is ``template`` if given, else the one chosen for the session, else the
+    default template.
+    """
     if not session.has_transcript:
         raise SummarizationError(
             f"session {session.id} has no transcript; run `vecho transcribe {session.id}` first"
@@ -238,14 +295,20 @@ def summarize_session(
     )
     segments = transcript.load_segments(session.path_for(TRANSCRIPT_JSON))
     lines = transcript.render_lines(segments, config.label_for)
-    body = summarize_lines(lines, client, config.summary_language, config.chunk_chars, on_progress)
+    store = TemplateStore(config.templates_dir)
+    chosen = store.get(template or session.meta.template or store.default_name())
+    body = summarize_lines(
+        lines, client, config.summary_language, config.chunk_chars, on_progress, chosen
+    )
 
     meta = session.meta
+    meta.template = chosen.name
     meta.llm_model = client.model
     meta.summarized_at = now_iso()
     header = (
         f"# {session.display_title}\n\n"
-        f"> {meta.created_at} · {transcript.format_duration(meta.duration_sec)} · {client.model}\n"
+        f"> {meta.created_at} · {transcript.format_duration(meta.duration_sec)} · {client.model}"
+        f" · {chosen.name}\n"
     )
     markdown = f"{header}\n{body}\n"
     write_atomic(session.path_for(SUMMARY_MD), markdown)

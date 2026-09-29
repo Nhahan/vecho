@@ -42,6 +42,7 @@ class SessionMeta:
     transcribed_at: str | None = None
     summarized_at: str | None = None
     issues: list[dict[str, str]] = field(default_factory=list)  # recording problems, for the app
+    template: str | None = None  # summary template chosen for this session
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionMeta:

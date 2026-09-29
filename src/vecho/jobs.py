@@ -76,9 +76,13 @@ class Processor:
         self._worker = threading.Thread(target=self._run, name="vecho-jobs", daemon=True)
         self._worker.start()
 
-    def submit(self, session: Session, step: str = "all") -> JobState:
+    def submit(self, session: Session, step: str = "all", template: str | None = None) -> JobState:
+        """Queue processing; ``template`` (a template name) is remembered for the session."""
         if step not in STEPS:
             raise VechoError(f"unknown processing step '{step}'")
+        if template is not None and template != session.meta.template:
+            session.meta.template = template
+            session.save()
         with self._lock:
             current = self._states.get(session.id)
             if current is not None and current.active:

@@ -401,3 +401,51 @@ def test_doctor_prefers_the_builtin_capture(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "system audio capture: built in" in out
     assert "BlackHole" not in out and "Multi-Output" not in out
+
+
+# ---- templates -------------------------------------------------------------------------------
+
+
+def test_templates_command_lifecycle(tmp_path, capsys):
+    source = tmp_path / "mentoring.md"
+    source.write_text("## 현황\n\n- **면접**\n\n## 숙제\n\n1.\n", encoding="utf-8")
+    assert cli.main(["templates", "add", "멘토링", str(source)]) == 0
+    assert "현황, 숙제" in capsys.readouterr().out
+    assert cli.main(["templates", "default", "멘토링"]) == 0
+    assert cli.main(["templates"]) == 0
+    out = capsys.readouterr().out
+    assert "* 멘토링" in out and "기본 요약" in out
+    assert cli.main(["templates", "show", "멘토링"]) == 0
+    assert "## 숙제" in capsys.readouterr().out
+    assert cli.main(["templates", "remove", "멘토링"]) == 0
+    assert cli.main(["templates", "show", "멘토링"]) == 1
+
+
+def test_templates_errors(tmp_path, capsys):
+    assert cli.main(["templates", "add", "x"]) == 1
+    bad = tmp_path / "bad.md"
+    bad.write_text("no headings here", encoding="utf-8")
+    assert cli.main(["templates", "add", "x", str(bad)]) == 1
+    assert "heading" in capsys.readouterr().err
+
+
+def test_import_and_summarize_accept_a_template(tmp_path, isolated_home, monkeypatch):
+    from vecho.templates import TemplateStore
+
+    TemplateStore(isolated_home / "templates").save("멘토링", "## 현황\n")
+    seen = {}
+
+    def fake_summarize(session, config, **kwargs):
+        seen["template"] = kwargs.get("template") or session.meta.template
+        session.path_for("summary.md").write_text("# s", encoding="utf-8")
+        return "# s"
+
+    stub_pipeline(monkeypatch)
+    monkeypatch.setattr(cli, "summarize_session", fake_summarize)
+    me = tmp_path / "me.wav"
+    write_wav(me)
+    assert cli.main(["import", "--me", str(me), "--template", "멘토링"]) == 0
+    assert seen["template"] == "멘토링"
+    assert cli.main(["summarize", "--template", "기본 요약"]) == 0
+    assert seen["template"] == "기본 요약"
+    assert cli.main(["summarize", "--template", "없는 것"]) == 1

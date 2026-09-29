@@ -214,9 +214,11 @@ def test_record_start_stop_then_process_automatically(served, mic):
     status, result, _ = client.call("POST", "/api/record/stop")
     assert status == 200 and result["processing"] is True
     session_id = result["session_id"]
-    assert wait_until(
+    ok = wait_until(
         lambda: client.call("GET", f"/api/sessions/{session_id}")[1]["status"] == "summarized"
     )
+    detail = client.call("GET", f"/api/sessions/{session_id}")[1]
+    assert ok, (detail["status"], detail["job"], detail["issues"])
 
     _, detail, _ = client.call("GET", f"/api/sessions/{session_id}")
     assert detail["summary"].startswith("## 한 줄 요약")  # file header stripped
@@ -470,3 +472,76 @@ def test_a_silent_other_side_is_reported_to_the_app(served, mic, monkeypatch):
     assert {"code": "silent", "role": "remote"}.items() <= result["issues"][0].items()
     _, detail, _ = client.call("GET", f"/api/sessions/{result['session_id']}")
     assert detail["issues"][0]["code"] == "silent"
+
+
+# ---- templates --------------------------------------------------------------------------------
+
+TEMPLATE = "## 현황\n\n- **면접**\n    - 총 3회 진행\n\n## 숙제\n\n1. 이력서 완성\n"
+
+
+def test_templates_crud_and_default(served):
+    app, client = served
+    _, data, _ = client.call("GET", "/api/templates")
+    assert data["default"] == "기본 요약" and data["templates"][0]["builtin"] is True
+
+    status, data, _ = client.call("PUT", "/api/templates/멘토링", {"body": TEMPLATE})
+    assert status == 200
+    saved = next(t for t in data["templates"] if t["name"] == "멘토링")
+    assert saved["sections"] == ["현황", "숙제"]
+
+    _, data, _ = client.call("POST", "/api/templates/멘토링/default")
+    assert data["default"] == "멘토링"
+
+    # rename keeps it the default
+    _, data, _ = client.call(
+        "PUT", "/api/templates/멘토링 노트", {"body": TEMPLATE, "previous": "멘토링"}
+    )
+    assert [t["name"] for t in data["templates"]] == ["기본 요약", "멘토링 노트"]
+    assert data["default"] == "멘토링 노트"
+
+    _, data, _ = client.call("DELETE", "/api/templates/멘토링 노트")
+    assert data["default"] == "기본 요약"
+
+
+def test_template_errors(served):
+    _, client = served
+    assert client.call("PUT", "/api/templates/x", {"body": "제목 없음"})[0] == 400
+    assert client.call("PUT", "/api/templates/기본 요약", {"body": TEMPLATE})[0] == 400
+    assert client.call("DELETE", "/api/templates/없음")[0] == 400
+    assert client.call("POST", "/api/record/start", {"template": "없음"})[0] == 404
+
+
+def test_recording_and_processing_remember_the_template(served, mic):
+    app, client = served
+    client.call("PUT", "/api/templates/멘토링", {"body": TEMPLATE})
+    _, state, _ = client.call("POST", "/api/record/start", {"template": "멘토링", "mic_only": True})
+    session_id = state["recording"]["session_id"]
+    mic()
+    client.call("POST", "/api/record/stop")
+    assert app.store.resolve(session_id).meta.template == "멘토링"
+
+    session = make_session(app, "다시", summary=False)
+    client.call(
+        "POST", f"/api/sessions/{session.id}/process", {"step": "all", "template": "멘토링"}
+    )
+    assert wait_until(
+        lambda: client.call("GET", f"/api/sessions/{session.id}")[1]["template"] == "멘토링"
+    )
+
+
+def test_import_with_a_template(served):
+    app, client = served
+    client.call("PUT", "/api/templates/멘토링", {"body": TEMPLATE})
+    _, result, _ = client.call(
+        "POST",
+        "/api/import",
+        raw=b"RIFF" + b"\0" * 100,
+        headers={"X-Filename": "call.m4a", "X-Template": "%EB%A9%98%ED%86%A0%EB%A7%81"},
+    )
+    assert app.store.resolve(result["session_id"]).meta.template == "멘토링"
+
+
+def test_preview_is_plain_text_for_template_summaries():
+    md = "# t\n\n> meta\n\n## 1. 현황\n\n- **지원 현황**\n    - 원티드 **150개** 지원\n"
+    assert tldr_of(md) == "원티드 150개 지원"
+    assert tldr_of("# t\n\n> m\n\n## A\n\n| a | b |\n| --- | --- |\n\n---\n") == ""

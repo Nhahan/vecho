@@ -48,6 +48,10 @@ class Config:
     def sessions_dir(self) -> Path:
         return self.home / "sessions"
 
+    @property
+    def templates_dir(self) -> Path:
+        return self.home / "templates"
+
     def label_for(self, role: str) -> str:
         """Speaker label for a track role; empty when the speaker is unknown."""
         if role == roles.ME:

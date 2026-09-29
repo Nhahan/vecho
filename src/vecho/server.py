@@ -23,7 +23,7 @@ from typing import Any
 
 import numpy as np
 
-from . import __version__, audio, jobs, recording, roles, systemaudio, transcript
+from . import __version__, audio, jobs, recording, roles, systemaudio, templates, transcript
 from .config import Config
 from .errors import SessionError, VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_JSON, Session, SessionStore
@@ -45,16 +45,28 @@ class Conflict(VechoError):
 
 
 def summary_body(markdown: str) -> str:
-    """Strip the title/metadata header that ``summary.md`` starts with."""
-    index = markdown.find("\n## ")
-    return markdown[index + 1 :].strip() if index >= 0 else markdown.strip()
+    """Strip the title and metadata lines that ``summary.md`` starts with."""
+    lines = markdown.strip().splitlines()
+    if lines and lines[0].startswith("# "):
+        lines = lines[1:]
+        while lines and not lines[0].strip():
+            lines = lines[1:]
+        if lines and lines[0].startswith(">"):
+            lines = lines[1:]
+    return "\n".join(lines).strip()
 
 
 def tldr_of(markdown: str) -> str:
-    body = summary_body(markdown)
-    for line in body.splitlines():
-        text = line.strip().lstrip("-*").strip()
-        if text and not line.startswith("#"):
+    """A one-line preview: the first line that says something, as plain text."""
+    for line in summary_body(markdown).splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "|", "```")) or set(stripped) <= set("-*_ "):
+            continue
+        if re.fullmatch(r"(?:[-*+]|\d+[.)])?\s*\*\*[^*]+\*\*\s*:?", stripped):
+            continue  # a bare label such as "- **지원 현황**"
+        text = re.sub(r"^(?:[-*+>]|\d+[.)])\s*", "", stripped)
+        text = re.sub(r"\*\*|__|`", "", text).replace("[ ]", "").replace("[x]", "").strip()
+        if len(text) >= 4:
             return text[:200]
     return ""
 
@@ -65,6 +77,7 @@ class App:
     def __init__(self, config: Config, processor: jobs.Processor | None = None) -> None:
         self.config = config
         self.store = SessionStore(config.sessions_dir)
+        self.templates = templates.TemplateStore(config.templates_dir)
         self.processor = processor or jobs.Processor(config)
         self.token = secrets.token_urlsafe(24)
         self._lock = threading.Lock()
@@ -73,12 +86,17 @@ class App:
 
     # -- recording --------------------------------------------------------------------------
 
-    def start_recording(self, title: str = "", mic_only: bool = False) -> dict[str, Any]:
+    def start_recording(
+        self, title: str = "", mic_only: bool = False, template: str | None = None
+    ) -> dict[str, Any]:
+        template = self._template_name(template)
         with self._lock:
             if self._live is not None:
                 raise Conflict("a recording is already running")
             live = recording.LiveRecording(self.config, title=title.strip(), mic_only=mic_only)
             live.start()
+            live.session.meta.template = template
+            live.session.save()
             self._live = live
             self._issues[live.session.id] = []
         return self.state()
@@ -199,6 +217,7 @@ class App:
             "language": meta.language,
             "whisper_model": meta.whisper_model,
             "llm_model": meta.llm_model,
+            "template": meta.template,
             "tracks": list(meta.tracks),
             "summary": summary_body(summary_path.read_text("utf-8"))
             if summary_path.is_file()
@@ -226,16 +245,63 @@ class App:
         self.processor.forget(session_id)
         self._issues.pop(session_id, None)
 
-    def process(self, session_id: str, step: str) -> dict[str, Any]:
+    def process(self, session_id: str, step: str, template: str | None = None) -> dict[str, Any]:
         session = self._session(session_id)
         if self._status(session) == "recording":
             raise Conflict("stop the recording first")
         if step == "summarize" and not session.has_transcript:
             step = "all"
-        self.processor.submit(session, step)
+        self.processor.submit(
+            session, step, self._template_name(template) if template is not None else None
+        )
         return self.session_detail(session_id)
 
-    def import_audio(self, filename: str, stream: Any, length: int) -> dict[str, Any]:
+    # -- templates ----------------------------------------------------------------------------
+
+    def _template_name(self, name: str | None) -> str:
+        """A valid template name: the requested one, or the default when not given."""
+        if not name:
+            return self.templates.default_name()
+        template = self.templates.get(name)
+        if template.name != name:
+            raise NotFound(f"no template named '{name}'")
+        return template.name
+
+    def list_templates(self) -> dict[str, Any]:
+        return {
+            "default": self.templates.default_name(),
+            "templates": [
+                {
+                    "name": t.name,
+                    "builtin": t.builtin,
+                    "body": t.body,
+                    "sections": templates.top_sections(t.body),
+                }
+                for t in self.templates.list()
+            ],
+        }
+
+    def save_template(self, name: str, body: str, previous: str | None = None) -> dict[str, Any]:
+        self.templates.save(name, body)
+        if previous and previous != name and self.templates.get(previous).name == previous:
+            was_default = self.templates.default_name() == previous
+            self.templates.delete(previous)
+            if was_default:
+                self.templates.set_default(name)
+        return self.list_templates()
+
+    def delete_template(self, name: str) -> dict[str, Any]:
+        self.templates.delete(name)
+        return self.list_templates()
+
+    def set_default_template(self, name: str) -> dict[str, Any]:
+        self.templates.set_default(name)
+        return self.list_templates()
+
+    def import_audio(
+        self, filename: str, stream: Any, length: int, template: str | None = None
+    ) -> dict[str, Any]:
+        template = self._template_name(template)
         suffix = Path(filename).suffix.lower()
         if suffix not in AUDIO_EXTENSIONS:
             raise VechoError(f"unsupported file type '{suffix or filename}'")
@@ -257,6 +323,7 @@ class App:
             shutil.rmtree(session.dir, ignore_errors=True)
             raise
         session.meta.tracks = {roles.MIXED: name}
+        session.meta.template = template
         session.save()
         self.processor.submit(session, "all")
         return {"session_id": session.id}
@@ -494,7 +561,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(
                     200,
                     app.start_recording(
-                        str(body.get("title", "")), bool(body.get("mic_only", False))
+                        str(body.get("title", "")),
+                        bool(body.get("mic_only", False)),
+                        body.get("template") or None,
                     ),
                 )
             case "POST", ["record", "stop"]:
@@ -509,13 +578,28 @@ class Handler(BaseHTTPRequestHandler):
                 app.delete(sid)
                 self._json(200, {"deleted": sid})
             case "POST", ["sessions", sid, "process"]:
-                self._json(200, app.process(sid, str(self._body().get("step", "all"))))
+                body = self._body()
+                self._json(
+                    200,
+                    app.process(sid, str(body.get("step", "all")), body.get("template") or None),
+                )
             case (("GET" | "HEAD"), ["sessions", sid, "audio"]):
                 self._file(app.playback_file(sid))
             case "POST", ["import"]:
                 name = urllib.parse.unquote(self.headers.get("X-Filename", ""))
                 length = int(self.headers.get("Content-Length") or 0)
-                self._json(200, app.import_audio(name, self.rfile, length))
+                template = urllib.parse.unquote(self.headers.get("X-Template", "")) or None
+                self._json(200, app.import_audio(name, self.rfile, length, template))
+            case "GET", ["templates"]:
+                self._json(200, app.list_templates())
+            case "PUT", ["templates", name]:
+                body = self._body()
+                previous = body.get("previous") or None
+                self._json(200, app.save_template(name, str(body.get("body", "")), previous))
+            case "DELETE", ["templates", name]:
+                self._json(200, app.delete_template(name))
+            case "POST", ["templates", name, "default"]:
+                self._json(200, app.set_default_template(name))
             case "GET", ["doctor"]:
                 self._json(200, app.doctor())
             case _:
@@ -552,7 +636,7 @@ class Handler(BaseHTTPRequestHandler):
             headers["Content-Range"] = f"bytes {start}-{end}/{size}"
         self._send(status, body, content_type, headers)
 
-    do_GET = do_POST = do_PATCH = do_DELETE = do_HEAD = _dispatch
+    do_GET = do_POST = do_PATCH = do_PUT = do_DELETE = do_HEAD = _dispatch
 
 
 class VechoHTTPServer(ThreadingHTTPServer):
