@@ -99,3 +99,7 @@ def test_ollama_client_defaults_follow_config():
     client = OllamaClient("http://x", "m")
     assert client.num_ctx == Config().llm_num_ctx
     assert client.timeout == Config().llm_timeout
+
+
+def test_empty_home_variable_is_ignored():
+    assert load_config({"VECHO_HOME": ""}).home == Config().home

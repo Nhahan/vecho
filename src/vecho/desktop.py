@@ -50,6 +50,8 @@ def _write_instance(config: Config, url: str, token: str) -> None:
     path = _instance_file(config)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # holds the API token
+    if hasattr(os, "fchmod"):
+        os.fchmod(fd, 0o600)  # also when an older, more readable file already existed
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump({"url": url, "token": token, "pid": os.getpid()}, handle)
 

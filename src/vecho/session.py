@@ -14,6 +14,7 @@ import contextlib
 import json
 import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
@@ -43,6 +44,7 @@ class SessionMeta:
     summarized_at: str | None = None
     issues: list[dict[str, str]] = field(default_factory=list)  # recording problems, for the app
     template: str | None = None  # summary template chosen for this session
+    offsets: dict[str, float] = field(default_factory=dict)  # track start delays, in seconds
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionMeta:
@@ -101,16 +103,28 @@ class Session:
         path = directory / META_FILE
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            if not isinstance(data, dict):
+                raise ValueError("not a JSON object")
+            meta = SessionMeta.from_dict(data)
+        except (OSError, ValueError, TypeError) as exc:  # includes bad UTF-8 and missing fields
             raise SessionError(f"cannot read session metadata {path}: {exc}") from exc
-        return cls(directory, SessionMeta.from_dict(data))
+        return cls(directory, meta)
 
 
 def write_atomic(path: Path, text: str) -> None:
-    """Replace ``path`` in one step, so readers (like the app) never see a half-written file."""
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    """Replace ``path`` in one step, so readers (like the app) never see a half-written file.
+
+    Each write uses its own temporary file, so two threads saving at once cannot collide.
+    """
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def slugify(title: str) -> str:

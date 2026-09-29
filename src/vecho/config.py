@@ -113,6 +113,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
     from_env = {
         f.name: env[ENV_PREFIX + f.name.upper()]
         for f in fields(Config)
-        if ENV_PREFIX + f.name.upper() in env
+        if ENV_PREFIX + f.name.upper() in env and (f.name != "home" or env[ENV_PREFIX + "HOME"])
     }
     return _apply(config, from_env, "environment")

@@ -122,3 +122,25 @@ def test_the_object_that_renames_still_wins(tmp_path):
     session.meta.title = "new"
     session.save()
     assert Session.load(session.dir).meta.title == "new"
+
+
+def test_concurrent_saves_never_collide(tmp_path):
+    import threading
+
+    session = SessionStore(tmp_path).create("x", now=MOMENT)
+    errors = []
+
+    def hammer():
+        for _ in range(200):
+            try:
+                session.save()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+    threads = [threading.Thread(target=hammer) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and Session.load(session.dir).meta.title == "x"
+    assert not list(session.dir.glob("*.tmp"))
