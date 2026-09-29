@@ -10,6 +10,7 @@ artifacts::
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -40,6 +41,7 @@ class SessionMeta:
     llm_model: str | None = None
     transcribed_at: str | None = None
     summarized_at: str | None = None
+    issues: list[dict[str, str]] = field(default_factory=list)  # recording problems, for the app
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionMeta:
@@ -51,6 +53,7 @@ class Session:
     def __init__(self, directory: Path, meta: SessionMeta) -> None:
         self.dir = directory
         self.meta = meta
+        self._saved_title = meta.title
 
     @property
     def id(self) -> str:
@@ -78,11 +81,19 @@ class Session:
         return self.path_for(SUMMARY_MD).is_file()
 
     def save(self) -> None:
-        """Write metadata atomically so a crash never leaves a truncated file."""
-        target = self.path_for(META_FILE)
-        tmp = target.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(asdict(self.meta), ensure_ascii=False, indent=2), "utf-8")
-        os.replace(tmp, target)
+        """Write metadata atomically so a crash never leaves a truncated file.
+
+        Several long-lived objects hold the same session (a running recording, a processing job)
+        while the user may rename it through another. Unless *this* object changed the title,
+        the title on disk wins, so a later save cannot silently undo a rename.
+        """
+        path = self.path_for(META_FILE)
+        if self.meta.title == self._saved_title and path.is_file():
+            with contextlib.suppress(OSError, ValueError, AttributeError):
+                on_disk = json.loads(path.read_text("utf-8"))
+                self.meta.title = str(on_disk.get("title", self.meta.title))
+        write_atomic(path, json.dumps(asdict(self.meta), ensure_ascii=False, indent=2))
+        self._saved_title = self.meta.title
 
     @classmethod
     def load(cls, directory: Path) -> Session:
@@ -92,6 +103,13 @@ class Session:
         except (OSError, json.JSONDecodeError) as exc:
             raise SessionError(f"cannot read session metadata {path}: {exc}") from exc
         return cls(directory, SessionMeta.from_dict(data))
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Replace ``path`` in one step, so readers (like the app) never see a half-written file."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def slugify(title: str) -> str:

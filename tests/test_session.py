@@ -103,3 +103,22 @@ def test_resolve_ambiguous_and_missing(tmp_path):
 def test_resolve_with_no_sessions(tmp_path):
     with pytest.raises(SessionError, match="no sessions"):
         SessionStore(tmp_path).resolve("latest")
+
+
+def test_a_stale_copy_does_not_undo_a_rename(tmp_path):
+    store = SessionStore(tmp_path)
+    recording = store.create("", now=MOMENT)  # e.g. held by a running recording
+    renamed = Session.load(recording.dir)  # e.g. the app renaming it meanwhile
+    renamed.meta.title = "디자인 리뷰"
+    renamed.save()
+    recording.meta.duration_sec = 12.0
+    recording.save()  # must keep the new title
+    meta = Session.load(recording.dir).meta
+    assert meta.title == "디자인 리뷰" and meta.duration_sec == 12.0
+
+
+def test_the_object_that_renames_still_wins(tmp_path):
+    session = SessionStore(tmp_path).create("old", now=MOMENT)
+    session.meta.title = "new"
+    session.save()
+    assert Session.load(session.dir).meta.title == "new"

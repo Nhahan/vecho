@@ -17,7 +17,7 @@ from typing import Any
 from . import transcript
 from .config import Config
 from .errors import SummarizationError
-from .session import SUMMARY_MD, TRANSCRIPT_JSON, Session, now_iso
+from .session import SUMMARY_MD, TRANSCRIPT_JSON, Session, now_iso, write_atomic
 
 # (stage, step, total steps)
 ProgressCallback = Callable[[str, int, int], None]
@@ -248,6 +248,6 @@ def summarize_session(
         f"> {meta.created_at} · {transcript.format_duration(meta.duration_sec)} · {client.model}\n"
     )
     markdown = f"{header}\n{body}\n"
-    session.path_for(SUMMARY_MD).write_text(markdown, encoding="utf-8")
+    write_atomic(session.path_for(SUMMARY_MD), markdown)
     session.save()
     return markdown

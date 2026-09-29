@@ -12,6 +12,7 @@ from typing import Any
 
 from . import roles
 from .errors import SessionError
+from .session import write_atomic
 
 LabelFor = Callable[[str], str]
 
@@ -154,7 +155,7 @@ def save_segments(
         "model": model,
         "segments": [asdict(segment) for segment in segments],
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_atomic(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def load_segments(path: Path) -> list[Segment]:
