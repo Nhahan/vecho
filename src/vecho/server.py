@@ -6,13 +6,16 @@ Host header, so other web pages open in the same browser cannot drive it.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import mimetypes
+import os
 import re
 import secrets
 import shutil
 import sys
+import tempfile
 import threading
 import urllib.parse
 import wave
@@ -84,6 +87,8 @@ class App:
         self._lock = threading.Lock()
         self._live: recording.LiveRecording | None = None
         self._issues: dict[str, list[dict[str, str]]] = {}
+        self._stopping: set[str] = set()
+        self._mix_lock = threading.Lock()
 
     # -- recording --------------------------------------------------------------------------
 
@@ -105,19 +110,24 @@ class App:
     def stop_recording(self) -> dict[str, Any]:
         with self._lock:
             live, self._live = self._live, None
+            if live is not None:
+                self._stopping.add(live.session.id)  # not deletable while being finalized
         if live is None:
             raise Conflict("nothing is being recorded")
-        result = live.stop()
-        session = result.session
-        issues = self._issues.setdefault(session.id, [])
-        issues.extend(result.issues)
-        processing = not result.too_short
-        if processing:
-            self.processor.submit(session, "all")
-        else:
-            issues.append({"code": "too_short", "role": "", "hint": ""})
-        session.meta.issues = issues
-        session.save()
+        try:
+            result = live.stop()
+            session = result.session
+            issues = self._issues.setdefault(session.id, [])
+            issues.extend(result.issues)
+            processing = not result.too_short
+            if not processing:
+                issues.append({"code": "too_short", "role": "", "hint": ""})
+            session.meta.issues = issues
+            session.save()
+            if processing:
+                self.processor.submit(session, "all")
+        finally:
+            self._stopping.discard(live.session.id)
         return {
             "session_id": session.id,
             "issues": issues,
@@ -161,7 +171,7 @@ class App:
 
     def _status(self, session: Session) -> str:
         live = self._live
-        if live is not None and live.session.id == session.id:
+        if (live is not None and live.session.id == session.id) or session.id in self._stopping:
             return "recording"
         job = self.processor.state(session.id)
         if job is not None and job.active:
@@ -219,6 +229,11 @@ class App:
             "whisper_model": meta.whisper_model,
             "llm_model": meta.llm_model,
             "template": meta.template,
+            # which renderer fits the summary on disk (decided by how it was made, not by
+            # whether that template still exists)
+            "template_summary": bool(
+                summary_path.is_file() and meta.template and meta.template != templates.BUILTIN_NAME
+            ),
             "tracks": list(meta.tracks),
             "summary": summary_body(summary_path.read_text("utf-8"))
             if summary_path.is_file()
@@ -248,8 +263,11 @@ class App:
 
     def process(self, session_id: str, step: str, template: str | None = None) -> dict[str, Any]:
         session = self._session(session_id)
-        if self._status(session) == "recording":
+        status = self._status(session)
+        if status == "recording":
             raise Conflict("stop the recording first")
+        if status == "processing":
+            raise Conflict("this session is already being processed")
         if step == "summarize" and not session.has_transcript:
             step = "all"
         self.processor.submit(
@@ -283,12 +301,7 @@ class App:
         }
 
     def save_template(self, name: str, body: str, previous: str | None = None) -> dict[str, Any]:
-        self.templates.save(name, body)
-        if previous and previous != name and self.templates.get(previous).name == previous:
-            was_default = self.templates.default_name() == previous
-            self.templates.delete(previous)
-            if was_default:
-                self.templates.set_default(name)
+        self.templates.save(name, body, previous)
         return self.list_templates()
 
     def delete_template(self, name: str) -> dict[str, Any]:
@@ -336,6 +349,11 @@ class App:
         session = self._session(session_id)
         tracks = [session.dir / name for name in session.meta.tracks.values()]
         tracks = [path for path in tracks if path.is_file()]
+        delays = {
+            session.dir / session.meta.tracks[role]: delay
+            for role, delay in session.meta.offsets.items()
+            if role in session.meta.tracks
+        }
         if not tracks:
             raise NotFound("this session has no audio")
         if len(tracks) == 1:
@@ -344,8 +362,9 @@ class App:
             return tracks[0]
         mix = session.path_for(MIX_FILE)
         newest = max(path.stat().st_mtime for path in tracks)
-        if not mix.is_file() or mix.stat().st_mtime < newest:
-            _mix_wavs(tracks, mix)
+        with self._mix_lock:  # browsers ask for several ranges at once
+            if not mix.is_file() or mix.stat().st_mtime < newest:
+                _mix_wavs(tracks, mix, delays)
         return mix
 
     # -- health -----------------------------------------------------------------------------
@@ -399,36 +418,79 @@ class App:
         return checks
 
 
-def _read_wav(path: Path) -> tuple[int, np.ndarray]:
-    with wave.open(str(path), "rb") as wav:
-        rate = wav.getframerate()
-        data = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
-        if wav.getnchannels() > 1:
-            data = data.reshape(-1, wav.getnchannels()).mean(axis=1)
-    return rate, data.astype(np.float64)
+_MIX_BLOCK = 1 << 20  # frames per step: bounded memory however long the recording is
 
 
-def _mix_wavs(paths: list[Path], target: Path) -> None:
-    loaded = [_read_wav(path) for path in paths]
-    rate = max(r for r, _ in loaded)
-    tracks = []
-    for track_rate, data in loaded:
-        if track_rate != rate and len(data):
-            positions = np.arange(int(len(data) * rate / track_rate)) * track_rate / rate
-            data = np.interp(positions, np.arange(len(data)), data)
-        tracks.append(data)
-    length = max((len(t) for t in tracks), default=0)
-    mixed = np.zeros(length)
-    for data in tracks:
-        mixed[: len(data)] += data
-    pcm = np.clip(np.rint(mixed), -32768, 32767).astype("<i2")
-    partial = target.with_suffix(".tmp")
-    with wave.open(str(partial), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(rate)
-        wav.writeframes(pcm.tobytes())
-    partial.replace(target)
+def _read_block(wav: wave.Wave_read, frames: int) -> np.ndarray:
+    data = np.frombuffer(wav.readframes(frames), dtype="<i2").astype(np.int32)
+    channels = wav.getnchannels()
+    if channels > 1:
+        data = data[: len(data) - len(data) % channels].reshape(-1, channels).mean(axis=1)
+        data = data.astype(np.int32)
+    return data
+
+
+def _padded_block(
+    reader: wave.Wave_read, whole: np.ndarray | None, pad: int, position: int
+) -> np.ndarray:
+    """Frames [position, position + block) of a track that starts ``pad`` frames late."""
+    end = position + _MIX_BLOCK
+    silence = max(0, min(end, pad) - position)
+    start = max(0, position - pad)
+    count = _MIX_BLOCK - silence
+    audio = whole[start : start + count] if whole is not None else _read_block(reader, count)
+    if not silence:
+        return audio
+    return np.concatenate([np.zeros(silence, dtype=np.int32), audio])
+
+
+def _resample(data: np.ndarray, rate: int, target_rate: int) -> np.ndarray:
+    positions = np.arange(int(len(data) * target_rate / rate)) * rate / target_rate
+    return np.interp(positions, np.arange(len(data)), data).astype(np.int32)
+
+
+def _mix_wavs(paths: list[Path], target: Path, delays: dict[Path, float] | None = None) -> None:
+    """Sum the tracks into one mono file, block by block (bounded memory).
+
+    ``delays`` (seconds) shifts tracks that started recording later than the others.
+    """
+    delays = delays or {}
+    with contextlib.ExitStack() as stack:
+        readers = [stack.enter_context(wave.open(str(path), "rb")) for path in paths]
+        rate = max(reader.getframerate() for reader in readers)
+        pads = [int(round(delays.get(path, 0.0) * rate)) for path in paths]
+        # Rare: a device that only records at another rate. Those tracks are resampled whole.
+        whole = {
+            i: _resample(_read_block(r, r.getnframes()), r.getframerate(), rate)
+            for i, r in enumerate(readers)
+            if r.getframerate() != rate
+        }
+        fd, partial = tempfile.mkstemp(dir=target.parent, prefix=".mix.", suffix=".tmp")
+        os.close(fd)
+        try:
+            with wave.open(partial, "wb") as out:
+                out.setnchannels(1)
+                out.setsampwidth(2)
+                out.setframerate(rate)
+                position = 0
+                while True:
+                    blocks = [
+                        _padded_block(reader, whole.get(i), pads[i], position)
+                        for i, reader in enumerate(readers)
+                    ]
+                    length = max(len(block) for block in blocks)
+                    if not length:
+                        break
+                    mixed = np.zeros(length, dtype=np.int32)
+                    for block in blocks:
+                        mixed[: len(block)] += block
+                    out.writeframes(np.clip(mixed, -32768, 32767).astype("<i2").tobytes())
+                    position += _MIX_BLOCK
+            os.replace(partial, target)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(partial)
+            raise
 
 
 # Static files of the web UI, by public name -> content type. Nothing else is ever served.
@@ -470,6 +532,10 @@ class Handler(BaseHTTPRequestHandler):
         self, status: int, body: bytes, content_type: str, headers: dict[str, str] | None = None
     ) -> None:
         self.send_response(status)
+        if not getattr(self, "_consumed", True):
+            # the request body was never read; it would be parsed as the next request
+            self.close_connection = True
+            self.send_header("Connection", "close")
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         headers = headers or {}
@@ -489,11 +555,18 @@ class Handler(BaseHTTPRequestHandler):
     def _error(self, status: int, message: str) -> None:
         self._json(status, {"error": message})
 
+    def _length(self) -> int:
+        raw = (self.headers.get("Content-Length") or "0").strip()
+        if not raw.isdigit():
+            raise VechoError("invalid Content-Length")
+        return int(raw)
+
     def _body(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length") or 0)
+        length = self._length()
         if length > 1024 * 1024:
             raise VechoError("request too large")
         raw = self.rfile.read(length) if length else b"{}"
+        self._consumed = True
         try:
             data = json.loads(raw or b"{}")
         except ValueError as exc:
@@ -511,6 +584,8 @@ class Handler(BaseHTTPRequestHandler):
         return secrets.compare_digest(supplied, self.app.token)
 
     def _dispatch(self) -> None:
+        # a body is only "unread" when one was sent; set True once a route reads it
+        self._consumed = (self.headers.get("Content-Length") or "0").strip() in {"", "0"}
         url = urllib.parse.urlsplit(self.path)
         path = urllib.parse.unquote(url.path)
         query = urllib.parse.parse_qs(url.query)
@@ -588,9 +663,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._file(app.playback_file(sid))
             case "POST", ["import"]:
                 name = urllib.parse.unquote(self.headers.get("X-Filename", ""))
-                length = int(self.headers.get("Content-Length") or 0)
+                length = self._length()
                 template = urllib.parse.unquote(self.headers.get("X-Template", "")) or None
-                self._json(200, app.import_audio(name, self.rfile, length, template))
+                result = app.import_audio(name, self.rfile, length, template)
+                self._consumed = True
+                self._json(200, result)
             case "GET", ["templates"]:
                 self._json(200, app.list_templates())
             case "PUT", ["templates", name]:
@@ -629,13 +706,26 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             status = HTTPStatus.PARTIAL_CONTENT
-        with path.open("rb") as handle:
-            handle.seek(start)
-            body = handle.read(end - start + 1)
-        headers = {"Accept-Ranges": "bytes"}
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(end - start + 1 if size else 0))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         if status == HTTPStatus.PARTIAL_CONTENT:
-            headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-        self._send(status, body, content_type, headers)
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.end_headers()
+        if self.command == "HEAD" or not size:
+            return
+        with path.open("rb") as handle:  # stream: never hold a whole recording in memory
+            handle.seek(start)
+            remaining = end - start + 1
+            while remaining:
+                chunk = handle.read(min(1 << 20, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
 
     do_GET = do_POST = do_PATCH = do_PUT = do_DELETE = do_HEAD = _dispatch
 

@@ -559,3 +559,164 @@ def test_clients_dropping_connections_are_not_logged(served, capsys):
             )
     time.sleep(0.3)
     assert "Traceback" not in capsys.readouterr().err
+
+
+def test_processing_twice_is_a_conflict_and_keeps_the_template(served):
+    import threading as th
+
+    app, client = served
+    gate = th.Event()
+    original = app.processor._transcribe
+
+    def slow(*args, **kwargs):
+        gate.wait(5)
+        return original(*args, **kwargs)
+
+    app.processor._transcribe = slow
+    client.call("PUT", "/api/templates/멘토링", {"body": TEMPLATE})
+    session = make_session(app, "느림", summary=False)
+    client.call("POST", f"/api/sessions/{session.id}/process", {"step": "all"})
+    status, _, _ = client.call(
+        "POST", f"/api/sessions/{session.id}/process", {"step": "all", "template": "멘토링"}
+    )
+    assert status == 409
+    gate.set()
+    assert wait_until(
+        lambda: client.call("GET", f"/api/sessions/{session.id}")[1]["status"] == "summarized"
+    )
+    assert app.store.resolve(session.id).meta.template != "멘토링"
+
+
+# ---- regressions found in review ----------------------------------------------------------
+
+
+def test_concurrent_audio_requests_all_get_the_full_mix(served):
+    from concurrent.futures import ThreadPoolExecutor
+
+    app, client = served
+    session = make_session(app, tracks=("me", "remote"))
+    path = f"/api/sessions/{session.id}/audio?t={app.token}"
+    with ThreadPoolExecutor(6) as pool:
+        results = list(pool.map(lambda _: client.call("GET", path, token=False), range(6)))
+    sizes = {len(body) for status, body, _ in results if status == 200}
+    assert [r[0] for r in results] == [200] * 6 and len(sizes) == 1 and sizes.pop() > 1000
+
+
+def test_mix_of_tracks_with_different_rates(tmp_path):
+    from vecho.server import _mix_wavs
+
+    for name, rate, value in (("a.wav", 16000, 1000), ("b.wav", 48000, 2000)):
+        with wave.open(str(tmp_path / name), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(rate)
+            w.writeframes(np.full(rate, value, dtype="<i2").tobytes())
+    _mix_wavs([tmp_path / "a.wav", tmp_path / "b.wav"], tmp_path / "mix.wav")
+    with wave.open(str(tmp_path / "mix.wav")) as w:
+        assert w.getframerate() == 48000
+        data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    assert abs(int(np.median(data)) - 3000) <= 1
+
+
+def test_corrupt_session_files_do_not_break_the_list(served):
+    app, client = served
+    make_session(app, "정상")
+    for name, raw in (
+        ("a-bad-utf8", b"\xff\xfe"),
+        ("b-list", b"[]"),
+        ("c-missing", b'{"title":"x"}'),
+    ):
+        (app.store.root / name).mkdir(parents=True)
+        (app.store.root / name / "session.json").write_bytes(raw)
+    status, items, _ = client.call("GET", "/api/sessions")
+    assert status == 200 and [i["title"] for i in items] == ["정상"]
+
+
+def test_bad_content_length_gets_an_answer(served):
+    import http.client
+
+    app, client = served
+    host, port = client.base.replace("http://", "").split(":")
+    conn = http.client.HTTPConnection(host, int(port), timeout=5)
+    conn.putrequest("PATCH", "/api/sessions/x")
+    conn.putheader("X-Vecho-Token", app.token)
+    conn.putheader("Content-Length", "abc")
+    conn.endheaders()
+    assert conn.getresponse().status == 400
+
+
+def test_a_rejected_upload_does_not_poison_the_connection(served):
+    import http.client
+
+    app, client = served
+    host, port = client.base.replace("http://", "").split(":")
+    conn = http.client.HTTPConnection(host, int(port), timeout=5)
+    conn.request(
+        "POST",
+        "/api/import",
+        body=b"x" * 100,
+        headers={"X-Vecho-Token": app.token, "X-Filename": "notes.txt"},
+    )
+    response = conn.getresponse()
+    assert response.status == 400 and response.getheader("Connection") == "close"
+    response.read()
+
+
+def test_a_session_being_finalized_cannot_be_deleted(served):
+    app, client = served
+    session = make_session(app)
+    app._stopping.add(session.id)
+    assert client.call("DELETE", f"/api/sessions/{session.id}")[0] == 409
+    app._stopping.discard(session.id)
+
+
+def test_detail_says_which_renderer_the_summary_needs(served):
+    app, client = served
+    plain = make_session(app, "기본")
+    _, detail, _ = client.call("GET", f"/api/sessions/{plain.id}")
+    assert detail["template_summary"] is False
+    plain.meta.template = "멘토링"
+    plain.save()
+    app.templates.save("멘토링", TEMPLATE)
+    app.templates.delete("멘토링")  # deleting the template must not change old summaries
+    _, detail, _ = client.call("GET", f"/api/sessions/{plain.id}")
+    assert detail["template_summary"] is True
+
+
+def test_mix_shifts_a_track_that_started_late(tmp_path):
+    from vecho.server import _mix_wavs
+
+    for name in ("me.wav", "remote.wav"):
+        with wave.open(str(tmp_path / name), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(np.full(16000, 1000, dtype="<i2").tobytes())
+    _mix_wavs(
+        [tmp_path / "me.wav", tmp_path / "remote.wav"],
+        tmp_path / "mix.wav",
+        {tmp_path / "remote.wav": 0.5},
+    )
+    with wave.open(str(tmp_path / "mix.wav")) as w:
+        data = np.frombuffer(w.readframes(w.getnframes()), dtype="<i2")
+    assert len(data) == 24000  # 1 s + 0.5 s delay
+    assert data[:8000].tolist() == [1000] * 8000
+    assert data[8000:16000].tolist() == [2000] * 8000
+    assert data[16000:].tolist() == [1000] * 8000
+
+
+def test_a_failed_other_side_keeps_the_microphone_recording(served, mic, monkeypatch):
+    app, client = served
+    monkeypatch.setattr(
+        systemaudio,
+        "prepare",
+        lambda bin_dir: SystemAudioSource(command=(sys.executable, FAKE_TAP, "48000", "crash")),
+    )
+    client.call("POST", "/api/record/start", {})
+    mic()
+    time.sleep(0.6)  # the fake helper dies
+    status, result, _ = client.call("POST", "/api/record/stop")
+    assert status == 200 and result["processing"] is True
+    assert any(i["code"] == "stopped" and i["role"] == "remote" for i in result["issues"])
+    session = app.store.resolve(result["session_id"])
+    assert session.meta.duration_sec >= 1.0
