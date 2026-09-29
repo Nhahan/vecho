@@ -8,6 +8,7 @@ Two engines run the same Whisper model:
 
 from __future__ import annotations
 
+import importlib.util
 import platform
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -150,13 +151,10 @@ def mlx_repo(model_name: str) -> str:
 
 
 def mlx_available() -> bool:
+    """Apple Silicon with mlx-whisper installed (checked without importing it: that is slow)."""
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         return False
-    try:
-        import mlx_whisper  # noqa: F401
-    except Exception:
-        return False
-    return True
+    return importlib.util.find_spec("mlx_whisper") is not None
 
 
 # Silence put between speech chunks so Whisper's word alignment sees where one ends.
