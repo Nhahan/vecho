@@ -336,3 +336,12 @@ def test_speech_only_skips_pure_silence():
     from vecho import transcribe as tr
 
     assert tr.speech_only(np.zeros(16000 * 40, dtype=np.float32)) is None
+
+
+def test_track_start_offsets_shift_the_later_track(tmp_path, config):
+    session = make_session(tmp_path, {"me": "me.wav", "remote": "remote.wav"})
+    session.meta.offsets = {"remote": 0.4}
+    session.save()
+    model = FakeModel({"me.wav": [(1.0, 2.0, "하나")], "remote.wav": [(0.8, 1.5, "둘")]})
+    segments = transcribe_session(session, config, transcriber_for(model))
+    assert [(s.role, s.start) for s in segments] == [("me", 1.0), ("remote", 1.2)]

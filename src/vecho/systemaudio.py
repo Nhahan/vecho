@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import wave
 from dataclasses import dataclass
 from importlib import resources
@@ -220,6 +221,7 @@ class SystemAudioRecorder:
         self._frames = 0
         self._error: str | None = None
         self._stopping = False
+        self._first_at: float | None = None
 
     def start(self) -> None:
         try:
@@ -238,7 +240,10 @@ class SystemAudioRecorder:
         self._thread.start()
         if not self._ready.wait(self.startup_timeout) or self._native_rate == 0:
             detail = self._stderr_text() or "it did not start in time"
+            self._stopping = True
             self._kill()
+            self._thread.join(timeout=5)
+            self._close_files()
             raise AudioError(f"system audio capture failed: {detail}")
 
     def _stderr_text(self) -> str:
@@ -246,6 +251,14 @@ class SystemAudioRecorder:
         return self._stderr.read().decode("utf-8", "replace").strip().removeprefix("error: ")
 
     def _read_loop(self) -> None:
+        try:
+            self._read()
+        except Exception as exc:  # never die silently: stop() reports it
+            self._error = self._error or f"reading system audio failed: {exc}"
+        finally:
+            self._ready.set()
+
+    def _read(self) -> None:
         proc = self._proc
         assert proc is not None and proc.stdout is not None
         try:
@@ -254,7 +267,7 @@ class SystemAudioRecorder:
                 self._native_rate = int(header[1])
         finally:
             self._ready.set()
-        if not self._native_rate:
+        if not self._native_rate or self._stopping:
             return
 
         rate = self._native_rate
@@ -273,6 +286,8 @@ class SystemAudioRecorder:
             chunk = proc.stdout.read1(_READ_SIZE)
             if not chunk:
                 break
+            if self._first_at is None:  # the chunk holds audio captured just before now
+                self._first_at = time.monotonic() - len(chunk) / 2 / rate
             data = carry + chunk
             usable = len(data) - (len(data) % 2)
             carry = data[usable:]
@@ -300,8 +315,20 @@ class SystemAudioRecorder:
         if proc.poll() is None:
             proc.kill()
         proc.wait()
-        if proc.stdin:
-            proc.stdin.close()
+        for pipe in (proc.stdin, proc.stdout):
+            if pipe:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+
+    def _close_files(self) -> None:
+        wav, self._wav = self._wav, None
+        if wav is not None:
+            try:
+                wav.close()
+            except Exception as exc:  # e.g. disk full while fixing up the header
+                self._error = self._error or f"writing {self.path.name} failed: {exc}"
+        with contextlib.suppress(OSError):
+            self._stderr.close()
 
     def stop(self) -> TrackStats:
         self._stopping = True
@@ -321,13 +348,16 @@ class SystemAudioRecorder:
                     proc.wait()
         if self._thread is not None:
             self._thread.join(timeout=5)
+        if proc is not None and proc.stdout:
+            with contextlib.suppress(OSError):
+                proc.stdout.close()
         self._proc = None
-        if self._wav is not None:
-            self._wav.close()
-            self._wav = None
-        self._stderr.close()
-        if self._error and self._frames == 0:
-            raise AudioError(f"system audio capture failed: {self._error}")
+        if self._error is None and not self._stderr.closed:
+            # the helper may have failed after announcing itself
+            text = self._stderr_text()
+            if text and self._frames == 0:
+                self._error = text
+        self._close_files()
         return TrackStats(
             role=self.role,
             path=self.path,
@@ -336,4 +366,5 @@ class SystemAudioRecorder:
             peak=self.peak,
             overflows=self.overflows,
             error=self._error,
+            started_at=self._first_at,
         )

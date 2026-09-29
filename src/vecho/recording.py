@@ -130,7 +130,18 @@ class LiveRecording:
         stats = self.recorder.stop()
 
         session = self.session
-        session.meta.duration_sec = max((s.duration for s in stats), default=0.0)
+        # Tracks start one after another; remember how much later each one's first sample was,
+        # so transcripts and playback line them up again.
+        starts = [s.started_at for s in stats if s.started_at is not None]
+        offsets = {
+            s.role: round(s.started_at - min(starts), 3)
+            for s in stats
+            if s.started_at is not None and s.started_at - min(starts) >= 0.005
+        }
+        session.meta.offsets = offsets
+        session.meta.duration_sec = max(
+            (s.duration + offsets.get(s.role, 0.0) for s in stats), default=0.0
+        )
         session.save()
 
         warnings: list[str] = []

@@ -30,19 +30,57 @@ tapDescription.isPrivate = true
 tapDescription.muteBehavior = .unmuted
 
 var tapID = AudioObjectID(kAudioObjectUnknown)
+var aggregateID = AudioObjectID(kAudioObjectUnknown)
+var procID: AudioDeviceIOProcID?
+var running = false
+
+// Releases whatever was created so far; used on every way out.
+func cleanUp() {
+    if running { AudioDeviceStop(aggregateID, procID) }
+    if let procID { AudioDeviceDestroyIOProcID(aggregateID, procID) }
+    if aggregateID != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(aggregateID) }
+    if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
+}
+
+func abort(_ message: String) -> Never {
+    cleanUp()
+    fail(message)
+}
+
+// stdout carries the protocol. Writes go straight to the file descriptor so a closed pipe
+// (the parent went away) is an error we handle, not an exception or a SIGPIPE crash.
+signal(SIGPIPE, SIG_IGN)
+func writeAll(_ data: Data) -> Bool {
+    data.withUnsafeBytes { raw -> Bool in
+        guard var pointer = raw.baseAddress else { return true }
+        var left = raw.count
+        while left > 0 {
+            let written = write(STDOUT_FILENO, pointer, left)
+            if written < 0 {
+                if errno == EINTR { continue }
+                return false
+            }
+            pointer += written
+            left -= written
+        }
+        return true
+    }
+}
+
 var status = AudioHardwareCreateProcessTap(tapDescription, &tapID)
 guard status == noErr else {
-    fail("cannot create the audio tap (CoreAudio error \(status)); is system audio recording allowed?")
+    tapID = kAudioObjectUnknown
+    abort("cannot create the audio tap (CoreAudio error \(status)); is system audio recording allowed?")
 }
 
 var formatAddress = address(kAudioTapPropertyFormat)
 var format = AudioStreamBasicDescription()
 var formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
 status = AudioObjectGetPropertyData(tapID, &formatAddress, 0, nil, &formatSize, &format)
-guard status == noErr else { fail("cannot read the tap format (error \(status))") }
+guard status == noErr else { abort("cannot read the tap format (error \(status))") }
 guard format.mFormatID == kAudioFormatLinearPCM,
     format.mFormatFlags & kAudioFormatFlagIsFloat != 0, format.mBitsPerChannel == 32
-else { fail("unexpected tap sample format") }
+else { abort("unexpected tap sample format") }
 let nonInterleaved = format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
 
 let aggregate: [String: Any] = [
@@ -57,18 +95,18 @@ let aggregate: [String: Any] = [
         ]
     ],
 ]
-var aggregateID = AudioObjectID(kAudioObjectUnknown)
 status = AudioHardwareCreateAggregateDevice(aggregate as CFDictionary, &aggregateID)
 guard status == noErr else {
-    AudioHardwareDestroyProcessTap(tapID)
-    fail("cannot create the capture device (CoreAudio error \(status))")
+    aggregateID = kAudioObjectUnknown
+    abort("cannot create the capture device (CoreAudio error \(status))")
 }
 
-let out = FileHandle.standardOutput
-out.write(Data("RATE \(Int(format.mSampleRate))\n".utf8))
+// Audio is only sent after the "RATE" line, which is only sent once capturing really started.
+let outputLock = NSLock()
+var announced = false
+var outputBroken = false
 
 let queue = DispatchQueue(label: "vecho.audio")
-var procID: AudioDeviceIOProcID?
 status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, queue) {
     _, inputData, _, _, _ in
     let buffers = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
@@ -94,17 +132,30 @@ status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, queue) {
         let mixed = max(-1, min(1, sum / Float(channels)))
         pcm[frame] = Int16(mixed * 32767)
     }
-    pcm.withUnsafeBytes { out.write(Data($0)) }
+    outputLock.lock()
+    defer { outputLock.unlock() }
+    guard announced, !outputBroken else { return }
+    if !pcm.withUnsafeBytes({ writeAll(Data($0)) }) {
+        outputBroken = true  // the parent is gone: stop cleanly
+        DispatchQueue.main.async { shutDown() }
+    }
 }
-guard status == noErr else { fail("cannot attach the audio callback (error \(status))") }
+guard status == noErr else {
+    procID = nil
+    abort("cannot attach the audio callback (error \(status))")
+}
 status = AudioDeviceStart(aggregateID, procID)
-guard status == noErr else { fail("cannot start capturing (error \(status))") }
+guard status == noErr else { abort("cannot start capturing (error \(status))") }
+running = true
+
+outputLock.lock()
+let told = writeAll(Data("RATE \(Int(format.mSampleRate))\n".utf8))
+announced = told
+outputLock.unlock()
+if !told { abort("the parent process is gone") }
 
 func shutDown() -> Never {
-    AudioDeviceStop(aggregateID, procID)
-    if let procID { AudioDeviceDestroyIOProcID(aggregateID, procID) }
-    AudioHardwareDestroyAggregateDevice(aggregateID)
-    AudioHardwareDestroyProcessTap(tapID)
+    cleanUp()
     exit(0)
 }
 

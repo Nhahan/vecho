@@ -319,7 +319,15 @@ def transcribe_session(
         if not path.is_file():
             raise TranscriptionError(f"audio file is missing: {path}")
         result = transcriber.transcribe(path, role, config.language, on_progress)
-        groups.append(result.segments)
+        shift = float(session.meta.offsets.get(role, 0.0))
+        groups.append(
+            [
+                Segment(round(s.start + shift, 3), round(s.end + shift, 3), s.role, s.text)
+                for s in result.segments
+            ]
+            if shift
+            else result.segments
+        )
         longest = max(longest, result.duration)
         if result.language and result.duration > detected[0]:
             detected = (result.duration, result.language)

@@ -75,6 +75,7 @@ class LoopbackRecorder:
         self._start_error: Exception | None = None
         self._error: str | None = None
         self._started_at = 0.0
+        self._first_at: float | None = None
 
     def start(self) -> None:
         sc = self._sc or load_soundcard()
@@ -97,6 +98,8 @@ class LoopbackRecorder:
     def _write(self, samples: np.ndarray) -> None:
         if len(samples) == 0 or self._wav is None:
             return
+        if self._first_at is None:
+            self._first_at = time.monotonic() - len(samples) / self.sample_rate
         level = int(np.abs(samples.astype(np.int32)).max()) / 32768.0
         self.level = level
         self.peak = max(self.peak, level)
@@ -148,7 +151,10 @@ class LoopbackRecorder:
         if self._thread is not None:
             self._thread.join(5)
         if self._wav is not None:
-            self._wav.close()
+            try:
+                self._wav.close()
+            except Exception as exc:  # e.g. disk full while fixing up the header
+                self._error = self._error or f"writing {self.path.name} failed: {exc}"
             self._wav = None
         return TrackStats(
             role=self.role,
@@ -158,4 +164,5 @@ class LoopbackRecorder:
             peak=self.peak,
             overflows=self.overflows,
             error=self._error,
+            started_at=self._first_at,
         )

@@ -99,7 +99,8 @@ class TrackStats:
     frames: int
     peak: float
     overflows: int
-    error: str | None = None  # set when the source failed but audio was kept
+    error: str | None = None  # set when the source failed; whatever was recorded is kept
+    started_at: float | None = None  # time.monotonic() of the first sample, for alignment
 
     @property
     def duration(self) -> float:
@@ -148,6 +149,7 @@ class TrackRecorder:
         self._thread: threading.Thread | None = None
         self._frames = 0
         self._write_error: Exception | None = None
+        self._first_at: float | None = None
         self.level = 0.0
         self.peak = 0.0
         self.overflows = 0
@@ -195,6 +197,8 @@ class TrackRecorder:
             mono = block.reshape(-1).astype(np.int16)
         if mono.size == 0:
             return
+        if self._first_at is None:  # this block began `frames` samples ago
+            self._first_at = time.monotonic() - frames / self.sample_rate
         level = int(np.abs(mono.astype(np.int32)).max()) / _INT16_FULL_SCALE
         self.level = level
         self.peak = max(self.peak, level)
@@ -225,12 +229,14 @@ class TrackRecorder:
             thread.join()
         wav, self._wav = self._wav, None
         if wav is not None:
-            wav.close()
+            try:
+                wav.close()
+            except Exception as exc:  # e.g. disk full while fixing up the header
+                self._write_error = self._write_error or exc
 
     def stop(self) -> TrackStats:
+        """Always returns stats; a failure is reported in ``error`` instead of raised."""
         self._teardown()
-        if self._write_error is not None:
-            raise AudioError(f"writing {self.path.name} failed: {self._write_error}")
         return TrackStats(
             role=self.role,
             path=self.path,
@@ -238,6 +244,10 @@ class TrackRecorder:
             frames=self._frames,
             peak=self.peak,
             overflows=self.overflows,
+            error=f"writing {self.path.name} failed: {self._write_error}"
+            if self._write_error
+            else None,
+            started_at=self._first_at,
         )
 
 
@@ -256,7 +266,7 @@ class Recorder:
                 started.append(track)
         except Exception:
             for track in started:
-                with contextlib.suppress(AudioError):
+                with contextlib.suppress(Exception):
                     track.stop()
             raise
         self._started_at = time.monotonic()
@@ -269,13 +279,21 @@ class Recorder:
         return {track.role: track.level for track in self.tracks}
 
     def stop(self) -> list[TrackStats]:
+        """Stop every track, even if one of them fails; failures come back as ``error``."""
         stats: list[TrackStats] = []
-        errors: list[str] = []
         for track in self.tracks:
             try:
                 stats.append(track.stop())
-            except AudioError as exc:
-                errors.append(str(exc))
-        if errors:
-            raise AudioError("; ".join(errors))
+            except Exception as exc:
+                stats.append(
+                    TrackStats(
+                        role=track.role,
+                        path=track.path,
+                        sample_rate=track.sample_rate,
+                        frames=0,
+                        peak=getattr(track, "peak", 0.0),
+                        overflows=getattr(track, "overflows", 0),
+                        error=str(exc),
+                    )
+                )
         return stats

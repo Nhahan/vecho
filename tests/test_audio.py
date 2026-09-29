@@ -187,5 +187,5 @@ def test_disk_write_failure_is_reported_on_stop(tmp_path):
 
     track._wav = BrokenWav()
     streams[0].push(np.ones((160, 1), dtype=np.int16))
-    with pytest.raises(AudioError, match="disk full"):
-        track.stop()
+    stats = track.stop()  # reported, not raised: the other tracks must still be stopped
+    assert "disk full" in stats.error
