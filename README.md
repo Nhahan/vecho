@@ -5,9 +5,9 @@ macOS · Windows · Linux에서 같은 화면으로 동작합니다. 녹음 · �
 음성과 대화 내용이 외부로 나가지 않습니다. (처음 한 번 모델 파일을 내려받을 때만 네트워크를 씁니다.)
 
 ```
-마이크 ("나") ──────────┐                               ┌─ 대화 (대본 형식)
-                       ├─ 트랙별 WAV ─ faster-whisper ─┤
-시스템 오디오 ("상대방") ┘   (me / remote)   (STT, 로컬) └─ 요약 카드 ← Ollama (LLM, 로컬)
+마이크 ("나") ──────────┐                          ┌─ 대화 (대본 형식)
+                       ├─ 트랙별 WAV ─ Whisper ────┤
+시스템 오디오 ("상대방") ┘   (me / remote)  (로컬 STT) └─ 요약 ← Ollama (로컬 LLM)
 ```
 
 내 목소리(마이크)와 상대방 목소리(컴퓨터에서 재생되는 소리)를 **별도 트랙**으로 녹음하기 때문에,
@@ -15,13 +15,25 @@ macOS · Windows · Linux에서 같은 화면으로 동작합니다. 녹음 · �
 
 ![요약 화면](docs/summary.png)
 
-## 사용법
+## 빠른 시작
+
+처음 한 번만 [설치](#설치)를 하고 나면, 실행은 두 단계입니다.
 
 ```bash
+# 1. 요약 AI(Ollama)가 켜져 있는지 확인 — `brew services start ollama`로 등록했다면 이미 켜져 있습니다
+ollama list
+
+# 2. 앱 실행
 vecho app
 ```
 
-앱 창(또는 기본 브라우저)이 열립니다.
+앱 창(desktop 옵션을 설치하지 않았다면 기본 브라우저)이 열립니다. 창을 닫거나 터미널에서
+`Ctrl+C`를 누르면 종료되며, 녹음 중이었다면 그때까지의 녹음이 저장됩니다.
+이미 실행 중일 때 `vecho app`을 다시 입력하면 새로 띄우지 않고 열려 있는 앱을 보여줍니다.
+
+> 설치하지 않고 저장소 폴더에서 바로 실행하려면: `uv run vecho app`
+
+## 사용법
 
 1. **녹음 시작** — 제목은 선택입니다. 통화·회의 전에 빨간 버튼을 누르세요.
 2. **대화** — Discord, Zoom, Meet, 전화 앱 등 무엇이든 됩니다. 녹음 중에는 내 목소리와 상대방 소리가 각각 파형으로 표시되고, 제목도 이때 입력할 수 있습니다.
@@ -45,16 +57,28 @@ vecho app
 
 ## 설치
 
-공통: Python 3.11 – 3.13, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com)
+필요한 것: Python 3.11 – 3.13, [uv](https://docs.astral.sh/uv/), [Ollama](https://ollama.com)
 
 ```bash
 git clone https://github.com/Nhahan/vecho.git && cd vecho
-uv tool install --python 3.12 --editable ".[desktop]"   # `vecho` 설치 (desktop: 전용 창, 빼면 브라우저)
-ollama pull qwen3.8:27b                   # 기본 요약 모델 (약 17GB, 메모리 32GB 이상 권장)
-vecho app
+uv tool install --python 3.12 --editable ".[desktop]"   # `vecho` 명령 설치 (desktop: 전용 창)
+
+brew install ollama && brew services start ollama       # 요약 AI (로그인 시 자동 실행)
+ollama pull qwen3.8:27b                                 # 기본 요약 모델 (약 17GB, 메모리 32GB 이상 권장)
+
+vecho doctor                                            # 준비 상태 점검 (모두 OK면 준비 끝)
 ```
 
+음성 인식 모델(약 1.6GB)은 첫 전사 때 자동으로 내려받습니다.
+
 메모리가 적다면 더 작은 모델을 쓰세요: `ollama pull qwen3:8b` 후 `VECHO_LLM_MODEL=qwen3:8b` ([설정](#설정)).
+
+### 음성 인식 속도
+
+Apple Silicon Mac에서는 **Mac GPU**(MLX)로, 그 밖의 환경에서는 CPU(faster-whisper)로 전사합니다.
+M4 Max 기준 68초짜리 대화(두 트랙)를 약 5초에 전사합니다(CPU로는 약 65초).
+두 방식 모두 말소리 구간만 골라 전사하므로, 조용한 구간에 없는 말("감사합니다" 등)이 생기지 않습니다.
+`whisper_backend` 설정으로 직접 고를 수 있습니다([설정](#설정)).
 
 ### 상대방 소리는 어떻게 녹음되나요?
 
@@ -130,7 +154,8 @@ remote_label = "상대방"
 | 설정 | 환경 변수 | 기본값 |
 | --- | --- | --- |
 | `whisper_model` | `VECHO_WHISPER_MODEL` | `large-v3-turbo` |
-| `whisper_compute_type` | `VECHO_WHISPER_COMPUTE_TYPE` | `int8` |
+| `whisper_backend` | `VECHO_WHISPER_BACKEND` | `auto` (Apple Silicon이면 `mlx`, 아니면 `faster-whisper`) |
+| `whisper_compute_type` | `VECHO_WHISPER_COMPUTE_TYPE` | `int8` (faster-whisper 전용) |
 | `language` | `VECHO_LANGUAGE` | 자동 감지 |
 | `llm_host` | `VECHO_LLM_HOST` | `http://127.0.0.1:11434` |
 | `llm_model` | `VECHO_LLM_MODEL` | `qwen3.8:27b` |
@@ -161,7 +186,7 @@ uv run ruff check .
 
 - **녹음에는 상대방의 동의가 필요할 수 있습니다.** 통화·회의를 녹음하기 전에 참석자에게 알리고 지역 법규를 확인하세요.
 - 음성 인식은 완벽하지 않으므로 중요한 결정 사항은 `transcript.md`와 대조해 확인하세요.
-- 처음 마이크를 사용할 때 macOS가 터미널 앱의 마이크 접근 권한을 묻습니다. 허용해야 녹음됩니다.
+- 처음 녹음할 때 macOS가 터미널 앱의 **마이크**와 **시스템 오디오 녹음** 권한을 묻습니다. 허용해야 녹음됩니다.
 
 ## 라이선스
 
