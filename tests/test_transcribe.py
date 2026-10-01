@@ -355,3 +355,17 @@ def test_segments_without_a_real_time_are_dropped(tmp_path, config):
     segments = transcribe_session(session, config, transcriber_for(model))
     assert [s.text for s in segments] == ["진짜"]
     json.loads(session.path_for("transcript.json").read_text("utf-8"), parse_constant=pytest.fail)
+
+
+def test_the_language_follows_the_track_with_the_most_speech(tmp_path, config):
+    session = make_session(tmp_path, {"me": "me.wav", "remote": "remote.wav"})
+    spoken = FakeModel({"me.wav": [(0.0, 9.0, "안녕하세요 반갑습니다")], "remote.wav": []})
+    silent_longer = FakeModel({"remote.wav": []}, language="en", duration=60.0)
+
+    class Both:
+        def transcribe(self, path, **kwargs):
+            model = spoken if path.endswith("me.wav") else silent_longer
+            return model.transcribe(path, **kwargs)
+
+    transcribe_session(session, config, transcriber_for(Both()))
+    assert session.meta.language == "ko"

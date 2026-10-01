@@ -335,11 +335,14 @@ def transcribe_session(
             ]
         )
         longest = max(longest, result.duration)
-        if result.language and result.duration > detected[0]:
-            detected = (result.duration, result.language)
+        # the track with the most speech decides; a silent track still "detects" a language
+        speech = sum(max(0.0, s.end - s.start) for s in result.segments)
+        if result.language and speech > detected[0]:
+            detected = (speech, result.language)
 
     segments = transcript.remove_echo(transcript.merge_segments(*groups))
     language = config.language or detected[1]
+    session.refresh()  # a rename made during transcription goes into the header
     # render before writing anything, so a failure leaves the previous transcript whole
     markdown = transcript.render_markdown(session.display_title, segments, config.label_for)
     transcript.save_segments(

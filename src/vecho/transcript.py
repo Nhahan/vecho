@@ -52,6 +52,9 @@ ECHO_WINDOW_SEC = 3.0
 ECHO_COVERAGE = 0.75
 ECHO_MIN_RUN = 3
 ECHO_MIN_CHARS = 6
+# An echo starts while the other side is still talking (the speaker plays it into the mic);
+# repeating something back ("110-234 맞죠?") starts after they finished.
+ECHO_LAG_SEC = 0.5
 
 
 def _normalize(text: str) -> str:
@@ -65,7 +68,8 @@ def _is_echo(segment: Segment, remote: Sequence[Segment]) -> bool:
     nearby = [
         r.text
         for r in remote
-        if r.start <= segment.end + ECHO_WINDOW_SEC and r.end >= segment.start - ECHO_WINDOW_SEC
+        if r.start - ECHO_WINDOW_SEC <= segment.start <= r.end + ECHO_LAG_SEC
+        or segment.start <= r.start <= segment.end
     ]
     heard = _normalize("".join(nearby))
     if not heard:

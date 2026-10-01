@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from collections.abc import Callable, Mapping
@@ -39,8 +40,8 @@ class Config:
         for name in ("llm_num_ctx", "chunk_chars", "sample_rate"):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"'{name}' must be a positive integer")
-        if self.llm_timeout <= 0:
-            raise ConfigError("'llm_timeout' must be positive")
+        if not math.isfinite(self.llm_timeout) or self.llm_timeout <= 0:
+            raise ConfigError("'llm_timeout' must be a positive number of seconds")
         if self.whisper_backend not in {"auto", "mlx", "faster-whisper"}:
             raise ConfigError("'whisper_backend' must be auto, mlx or faster-whisper")
 

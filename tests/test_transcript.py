@@ -211,3 +211,13 @@ def test_echoes_with_recognition_differences_are_removed(heard, echo):
 
     kept = remove_echo([seg(0, 5, "remote", heard), seg(0.3, 5.2, "me", echo)])
     assert [s.role for s in kept] == ["remote"]
+
+
+def test_repeating_back_what_was_said_is_not_an_echo():
+    from vecho.transcript import remove_echo
+
+    segments = [
+        seg(10, 13, "remote", "계좌번호는 110-234-567890 입니다"),
+        seg(13.8, 15.5, "me", "110-234-567890 맞죠?"),
+    ]
+    assert [s.role for s in remove_echo(segments)] == ["remote", "me"]

@@ -103,3 +103,14 @@ def test_ollama_client_defaults_follow_config():
 
 def test_empty_home_variable_is_ignored():
     assert load_config({"VECHO_HOME": ""}).home == Config().home
+
+
+def test_a_timeout_that_is_not_a_number_is_rejected():
+    import pytest
+
+    from vecho.config import Config
+    from vecho.errors import ConfigError
+
+    for bad in (float("nan"), float("inf"), 0):
+        with pytest.raises(ConfigError):
+            Config(llm_timeout=bad)

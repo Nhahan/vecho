@@ -167,7 +167,8 @@ class OllamaClient:
         num_ctx: int = Config.llm_num_ctx,
         timeout: float = Config.llm_timeout,
     ) -> None:
-        self.host = host.rstrip("/")
+        host = host.strip().rstrip("/")
+        self.host = host if "://" in host else f"http://{host}"  # "localhost:11434" works too
         self.model = model
         self.num_ctx = num_ctx
         self.timeout = timeout
@@ -237,7 +238,10 @@ class OllamaClient:
 
     def list_models(self) -> list[str]:
         data = self._request("/api/tags")
-        return [str(item.get("name", "")) for item in data.get("models", [])]
+        models = data.get("models") if isinstance(data, dict) else None
+        if not isinstance(models, list):
+            raise SummarizationError("Ollama sent an unexpected model list")
+        return [str(item.get("name", "")) for item in models if isinstance(item, dict)]
 
     def has_model(self) -> bool:
         wanted = self.model if ":" in self.model else f"{self.model}:latest"
@@ -341,6 +345,7 @@ def summarize_session(
         lines, client, config.summary_language, config.chunk_chars, on_progress, chosen
     )
 
+    session.refresh()  # a rename made while the model was writing goes into the header
     meta = session.meta
     meta.template = chosen.name
     meta.summary_template = chosen.name  # what summary.md was actually made with
