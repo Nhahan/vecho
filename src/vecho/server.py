@@ -534,19 +534,26 @@ def _as_plain_wav(path: Path, directory: Path) -> Path:
     """``path`` itself if it is a plain WAV, else a 16 kHz mono copy decoded with FFmpeg (PyAV)."""
     if _plain_wav(path):
         return path
-    try:
-        from faster_whisper import decode_audio
-
-        samples = decode_audio(str(path), sampling_rate=16000)
-    except Exception as exc:
-        raise VechoError(f"cannot decode {path.name} for playback: {exc}") from exc
     fd, name = tempfile.mkstemp(dir=directory, prefix=".decoded.", suffix=".wav")
     os.close(fd)
-    with wave.open(name, "wb") as out:
-        out.setnchannels(1)
-        out.setsampwidth(2)
-        out.setframerate(16000)
-        out.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+    try:
+        import av
+
+        # frame by frame: a two-hour import never sits decoded in memory as a whole
+        with av.open(str(path)) as container, wave.open(name, "wb") as out:
+            out.setnchannels(1)
+            out.setsampwidth(2)
+            out.setframerate(16000)
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+            for frame in container.decode(audio=0):
+                for converted in resampler.resample(frame):
+                    out.writeframes(converted.to_ndarray().tobytes())
+            for converted in resampler.resample(None):
+                out.writeframes(converted.to_ndarray().tobytes())
+    except Exception as exc:
+        with contextlib.suppress(OSError):
+            os.unlink(name)
+        raise VechoError(f"cannot decode {path.name} for playback: {exc}") from exc
     return Path(name)
 
 
