@@ -250,7 +250,7 @@ def test_mlx_maps_times_back_and_splits_at_pauses(tmp_path, monkeypatch):
 
     # one speech chunk that really began at 10 s
     timeline = SpeechTimeline([{"start": 160000, "end": 240000}], 16000)
-    monkeypatch.setattr(tr, "speech_only", lambda audio: (audio[:100], timeline))
+    monkeypatch.setattr(tr, "speech_windows", lambda audio: [(audio[:100], timeline)])
     seen = {}
 
     def fake_mlx(audio, **kwargs):
@@ -289,7 +289,8 @@ def test_mlx_errors_are_wrapped(tmp_path, monkeypatch):
 
     path = tmp_path / "me.wav"
     write_speech_wav(path)
-    monkeypatch.setattr(tr, "speech_only", lambda audio: (audio, None))
+    timeline = tr.SpeechTimeline([{"start": 0, "end": 16000}], 16000)
+    monkeypatch.setattr(tr, "speech_windows", lambda audio: [(audio, timeline)])
 
     def broken(audio, **kwargs):
         raise RuntimeError("metal device lost")
@@ -369,3 +370,47 @@ def test_the_language_follows_the_track_with_the_most_speech(tmp_path, config):
 
     transcribe_session(session, config, transcriber_for(Both()))
     assert session.meta.language == "ko"
+
+
+def test_a_sentence_keeps_its_first_word_when_whisper_times_it_early():
+    from vecho.transcribe import CHUNK_GAP_SEC, SpeechTimeline
+
+    # "...같아요" ends chunk 1 (0-5 s); "그럼 알림 서비스" starts chunk 2, said at 60 s
+    timeline = SpeechTimeline(
+        [{"start": 0, "end": 80000}, {"start": 960000, "end": 1040000}], 16000, CHUNK_GAP_SEC
+    )
+    second = 5 + CHUNK_GAP_SEC  # where chunk 2 starts in the joined audio
+    words = timeline.place_words(
+        [
+            (4.0, 4.9, "같아요"),
+            (second - 1.4, second + 0.2, "그럼"),
+            (second + 0.3, second + 0.9, "알림"),
+        ]
+    )
+    assert [round(w.start) for w in words] == [4, 60, 60]
+
+
+def test_long_speech_is_transcribed_in_windows_with_progress(tmp_path, monkeypatch):
+    import numpy as np
+
+    from vecho import transcribe as tr
+
+    path = tmp_path / "me.wav"
+    path.write_bytes(b"")  # decoding is replaced below: 2500 s, speech in 25 one-minute chunks
+    chunks = [{"start": k * 16000 * 100, "end": k * 16000 * 100 + 16000 * 60} for k in range(25)]
+    audio = np.zeros(16000 * 2500, dtype=np.float32)
+    monkeypatch.setattr("faster_whisper.decode_audio", lambda *a, **k: audio)
+    monkeypatch.setattr("faster_whisper.vad.get_speech_timestamps", lambda a, options: chunks)
+    calls = []
+
+    def fake_mlx(joined, **kwargs):
+        calls.append((len(joined) / 16000, kwargs["language"]))
+        return {"language": "ko", "segments": []}
+
+    progress = []
+    tr.MlxTranscriber("large-v3-turbo", transcribe_fn=fake_mlx).transcribe(
+        path, "me", on_progress=lambda *a: progress.append(a[1])
+    )
+    assert len(calls) == 3 and all(seconds <= tr.WINDOW_SEC for seconds, _ in calls)
+    assert [language for _, language in calls] == [None, "ko", "ko"]  # detected once
+    assert progress == sorted(progress) and len(progress) >= 4

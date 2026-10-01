@@ -158,8 +158,12 @@ def mlx_available() -> bool:
     return importlib.util.find_spec("mlx_whisper") is not None
 
 
-# Silence put between speech chunks so Whisper's word alignment sees where one ends.
-CHUNK_GAP_SEC = 0.6
+# Silence put between speech chunks so Whisper's word alignment sees where one ends. Whisper
+# often times the first word of a chunk up to ~1.3 s early; a shorter gap let that word land
+# in the previous chunk, detached from its sentence and placed seconds to minutes too early.
+CHUNK_GAP_SEC = 1.5
+# Long recordings are transcribed in windows of joined speech, which also gives progress.
+WINDOW_SEC = 600.0
 
 
 class SpeechTimeline:
@@ -173,33 +177,59 @@ class SpeechTimeline:
             self.spans.append((position, position + length, chunk["start"] / rate))
             position += length + gap
 
-    def to_original(self, start: float, end: float) -> tuple[float, float]:
-        """Map a span of joined audio back to the recording.
+    def chunk_of(self, start: float, end: float) -> tuple[int, bool]:
+        """The chunk holding the span's midpoint (or the nearest one), and whether it was in a gap.
 
-        The span belongs to the chunk holding its midpoint (or the nearest one when it falls in
-        a gap), and is clamped to that chunk. Mapping each end on its own would send a word
-        starting right at a boundary to the previous chunk, gluing sentences said half a
-        minute apart together.
+        Mapping each end on its own would send a word starting right at a boundary to the
+        previous chunk, gluing sentences said half a minute apart together.
         """
         middle = (start + end) / 2
 
-        def distance(span: tuple[float, float, float]) -> float:
+        def distance(index: int) -> float:
+            span = self.spans[index]
             if span[0] <= middle <= span[1]:
                 return 0.0
             return min(abs(middle - span[0]), abs(middle - span[1]))
 
-        joined_start, joined_end, original = min(self.spans, key=distance)
+        index = min(range(len(self.spans)), key=distance)
+        return index, distance(index) > 0
+
+    def to_original(
+        self, start: float, end: float, chunk: int | None = None
+    ) -> tuple[float, float]:
+        """Map a span of joined audio back to the recording, clamped to its chunk."""
+        if chunk is None:
+            chunk = self.chunk_of(start, end)[0]
+        joined_start, joined_end, original = self.spans[chunk]
         start = min(max(start, joined_start), joined_end)
         end = min(max(end, start), joined_end)
         return round(original + start - joined_start, 2), round(original + end - joined_start, 2)
 
+    def place_words(self, words: list[tuple[float, float, str]]) -> list[SimpleNamespace]:
+        """Map words back to the recording, keeping a sentence's first word with its sentence.
 
-def speech_only(audio: Any, gap: float = CHUNK_GAP_SEC) -> tuple[Any, SpeechTimeline] | None:
-    """Keep only the speech in ``audio`` (Silero VAD), with a map back to original times.
+        A word whose midpoint falls in the silence between two chunks is an opener timed too
+        early when the next word starts the following chunk; otherwise it ends the previous one.
+        """
+        chunks = [self.chunk_of(start, end) for start, end, _ in words]
+        placed = []
+        for i, ((start, end, text), (chunk, in_gap)) in enumerate(zip(words, chunks, strict=True)):
+            if in_gap and i + 1 < len(words) and chunks[i + 1][0] > chunk:
+                chunk = chunks[i + 1][0]
+            first, last = self.to_original(start, end, chunk)
+            placed.append(SimpleNamespace(start=first, end=last, word=text))
+        return placed
+
+
+def speech_windows(
+    audio: Any, gap: float = CHUNK_GAP_SEC, window: float = WINDOW_SEC
+) -> list[tuple[Any, SpeechTimeline]]:
+    """Only the speech in ``audio`` (Silero VAD), joined into windows, with maps back to time.
 
     Whisper invents text for silence ("감사합니다", "Thank you."), and on a per-speaker track
     one side is silent most of the time. Joining just the speech removes the silence Whisper
-    would hallucinate on while keeping the sentences together for context.
+    would hallucinate on while keeping the sentences together for context. Each window holds
+    about ``window`` seconds of speech (whole chunks), so long recordings report progress.
     """
     import numpy as np
     from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -207,14 +237,29 @@ def speech_only(audio: Any, gap: float = CHUNK_GAP_SEC) -> tuple[Any, SpeechTime
     chunks = get_speech_timestamps(
         audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=400)
     )
-    if not chunks:
-        return None
-    silence = np.zeros(int(gap * SAMPLE_RATE), dtype=audio.dtype)
-    pieces = []
+    groups: list[list[dict[str, int]]] = []
+    length = 0.0
     for chunk in chunks:
-        pieces += [audio[chunk["start"] : chunk["end"]], silence]
-    joined = np.concatenate(pieces[:-1])
-    return joined, SpeechTimeline(chunks, SAMPLE_RATE, gap)
+        size = (chunk["end"] - chunk["start"]) / SAMPLE_RATE + gap
+        if not groups or length + size > window:
+            groups.append([])
+            length = 0.0
+        groups[-1].append(chunk)
+        length += size
+    silence = np.zeros(int(gap * SAMPLE_RATE), dtype=audio.dtype)
+    windows = []
+    for group in groups:
+        pieces = []
+        for chunk in group:
+            pieces += [audio[chunk["start"] : chunk["end"]], silence]
+        windows.append((np.concatenate(pieces[:-1]), SpeechTimeline(group, SAMPLE_RATE, gap)))
+    return windows
+
+
+def speech_only(audio: Any, gap: float = CHUNK_GAP_SEC) -> tuple[Any, SpeechTimeline] | None:
+    """All speech in ``audio`` as one window (see :func:`speech_windows`)."""
+    windows = speech_windows(audio, gap, window=float("inf"))
+    return windows[0] if windows else None
 
 
 class MlxTranscriber:
@@ -248,40 +293,52 @@ class MlxTranscriber:
             duration = len(audio) / SAMPLE_RATE
             if on_progress:
                 on_progress(role, 0.0, duration)
-            speech = speech_only(audio)
-            if speech is None:  # nothing but silence: skip the model entirely
+            windows = speech_windows(audio)
+            del audio
+            segments: list[Segment] = []
+            detected = language
+            for joined, timeline in windows:
+                result = self._fn()(
+                    joined,
+                    path_or_hf_repo=self.repo,
+                    language=detected,
+                    condition_on_previous_text=False,
+                    word_timestamps=True,
+                    verbose=None,
+                )
+                detected = detected or result.get("language")  # the same for every window
+                segments += self._segments(result, timeline, role)
                 if on_progress:
-                    on_progress(role, duration, duration)
-                return TrackTranscription([], None, duration)
-            joined, timeline = speech
-            result = self._fn()(
-                joined,
-                path_or_hf_repo=self.repo,
-                language=language,
-                condition_on_previous_text=False,
-                word_timestamps=True,
-                verbose=None,
-            )
+                    reached = timeline.spans[-1][2] + timeline.spans[-1][1] - timeline.spans[-1][0]
+                    on_progress(role, min(reached, duration), duration)
         except TranscriptionError:
             raise
         except Exception as exc:
             raise TranscriptionError(f"transcribing {path.name} failed: {exc}") from exc
+        if on_progress:
+            on_progress(role, duration, duration)
+        return TrackTranscription(segments, detected if windows else None, duration)
 
+    @staticmethod
+    def _segments(result: dict[str, Any], timeline: SpeechTimeline, role: str) -> list[Segment]:
         segments: list[Segment] = []
         for raw in result.get("segments", []):
-            words = []
-            for w in raw.get("words") or []:
-                start, end = timeline.to_original(float(w["start"]), float(w["end"]))
-                words.append(SimpleNamespace(start=start, end=end, word=str(w["word"])))
-            start, end = timeline.to_original(float(raw["start"]), float(raw["end"]))
+            words = timeline.place_words(
+                [
+                    (float(w["start"]), float(w["end"]), str(w["word"]))
+                    for w in raw.get("words") or []
+                ]
+            )
+            if words:
+                start, end = words[0].start, words[-1].end
+            else:
+                start, end = timeline.to_original(float(raw["start"]), float(raw["end"]))
             segments.extend(
                 split_at_pauses(
                     SimpleNamespace(start=start, end=end, text=raw["text"], words=words), role
                 )
             )
-        if on_progress:
-            on_progress(role, duration, duration)
-        return TrackTranscription(segments, result.get("language"), duration)
+        return segments
 
 
 def make_transcriber(config: Config) -> Transcriber | MlxTranscriber:
@@ -290,6 +347,26 @@ def make_transcriber(config: Config) -> Transcriber | MlxTranscriber:
     if backend == "mlx" or (backend == "auto" and mlx_available()):
         return MlxTranscriber(config.whisper_model)
     return Transcriber(config.whisper_model, config.whisper_compute_type)
+
+
+def model_cached(config: Config) -> bool:
+    """Whether the speech model is already on disk (the first run downloads ~1.5 GB)."""
+    try:
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        engine = make_transcriber(config)
+        if isinstance(engine, MlxTranscriber):
+            repo = engine.repo
+        else:
+            from faster_whisper.utils import _MODELS
+
+            repo = _MODELS.get(config.whisper_model, config.whisper_model)
+        if Path(repo).exists():  # a local model folder
+            return True
+        snapshots = Path(HF_HUB_CACHE) / f"models--{repo.replace('/', '--')}" / "snapshots"
+        return any(snapshots.iterdir())
+    except Exception:
+        return True  # unknown: better not to promise a download that will not happen
 
 
 def engine_label(config: Config) -> str:
