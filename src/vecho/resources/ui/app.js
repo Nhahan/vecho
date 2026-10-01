@@ -611,6 +611,7 @@ function issueTitle(issue) {
 function issueDetail(issue) {
   if (issue.code === "silent") return issue.role === "me" ? T.is_silent_me_d : T.is_silent_remote_d;
   if (issue.code === "stopped") return `${T.is_stopped_d} (${issue.hint})`;
+  if (issue.code === "dropped" && /\d s$/.test(issue.hint || "")) return `${T.is_dropped_d} (${issue.hint})`;
   return T["is_" + issue.code + "_d"] || "";
 }
 
