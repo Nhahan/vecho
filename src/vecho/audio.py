@@ -115,6 +115,14 @@ class TrackStats:
     overflows: int
     error: str | None = None  # set when the source failed; whatever was recorded is kept
     started_at: float | None = None  # time.monotonic() of the first sample, for alignment
+    ended_at: float | None = None  # time.monotonic() when the last sample arrived
+
+    @property
+    def lost(self) -> float:
+        """Seconds of audio that never arrived (e.g. the computer was too busy to take it)."""
+        if self.started_at is None or self.ended_at is None or not self.sample_rate:
+            return 0.0
+        return max(0.0, (self.ended_at - self.started_at) - self.duration)
 
     @property
     def duration(self) -> float:
@@ -334,6 +342,7 @@ class TrackRecorder:
         self._first_at: float | None = None
         self._closed = False
         self._queued = 0  # samples received from the device
+        self._last_at: float | None = None
         self._source_error: str | None = None
         self.level = 0.0
         self.peak = 0.0
@@ -398,6 +407,7 @@ class TrackRecorder:
         self.level = level
         self.peak = max(self.peak, level)
         self._queued += mono.size
+        self._last_at = time.monotonic()
         self._queue.put(mono.tobytes())
 
     def _write_loop(self) -> None:
@@ -420,9 +430,9 @@ class TrackRecorder:
         if stream is not None:
             _close_stream(stream, self.device.name)
             self._source_error = self._source_error or getattr(stream, "error", None)
-            if self._source_error is None and self._first_at is not None:
+            if self._source_error is None and self._last_at is not None:
                 # audio that stopped arriving (a device unplugged mid-recording) is not silence
-                missing = (stopped_at - self._first_at) - self._queued / self.sample_rate
+                missing = stopped_at - self._last_at
                 if missing > GAP_REPORT_SEC:
                     self._source_error = (
                         f"no audio arrived for the last {missing:.0f} s; the device may have "
@@ -454,6 +464,7 @@ class TrackRecorder:
             if self._write_error
             else self._source_error,
             started_at=self._first_at,
+            ended_at=self._last_at,
         )
 
 

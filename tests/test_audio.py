@@ -250,3 +250,39 @@ def test_audio_that_stops_arriving_is_reported(tmp_path, monkeypatch):
     stats = track.stop()
     assert stats.error and "disconnected" in stats.error
     assert track.level == 0.0
+
+
+def test_audio_lost_in_the_middle_is_measured_against_the_clock(tmp_path):
+    """A source that skips 1.5 s (the computer too busy to take it) is short by that much."""
+    import threading
+
+    class Skipping:
+        def __init__(self, callback):
+            self.callback, self.running = callback, True
+
+        def start(self):
+            def feed():
+                for k in range(30):
+                    if not self.running:
+                        return
+                    if k != 10:  # one 0.1 s block arrives; the rest of the stall is lost
+                        self.callback(np.zeros((1600, 1), dtype=np.int16), 1600, None, None)
+                    time.sleep(1.5 if k == 10 else 0.1)
+
+            threading.Thread(target=feed, daemon=True).start()
+
+        def abort(self):
+            self.running = False
+
+        def close(self):
+            pass
+
+    device = audio.InputDevice(0, "Mic", 1, 16000.0)
+    track = audio.TrackRecorder(
+        "me", device, tmp_path / "me.wav", stream_factory=lambda d, r, c, cb: Skipping(cb)
+    )
+    track.start()
+    time.sleep(4.2)
+    stats = track.stop()
+    assert 1.2 < stats.lost < 2.0
+    assert audio.TrackStats("me", tmp_path, 16000, 16000, 0.5, 0).lost == 0.0  # no timing known

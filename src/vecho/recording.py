@@ -69,6 +69,10 @@ class RecordingResult:
         return (self.session.meta.duration_sec or 0.0) < TOO_SHORT_SEC
 
 
+# Audio a track is missing (compared with the clock) before the recording reports it.
+LOST_REPORT_SEC = 1.0
+
+
 class LiveRecording:
     """Owns the session directory and track recorders of one recording."""
 
@@ -166,7 +170,8 @@ class LiveRecording:
                 hint = silence_hint(sources[stat.role])
                 warnings.append(f"the {label} track is silent; {hint}.")
                 issues.append({"code": "silent", "role": stat.role, "hint": hint})
-            if stat.overflows:
-                warnings.append(f"the {label} track dropped audio {stat.overflows} time(s).")
-                issues.append({"code": "dropped", "role": stat.role, "hint": str(stat.overflows)})
+            if stat.overflows or (not stat.error and stat.lost > LOST_REPORT_SEC):
+                what = f"{stat.lost:.1f} s" if stat.lost > LOST_REPORT_SEC else "some"
+                warnings.append(f"the {label} track is missing {what} of audio.")
+                issues.append({"code": "dropped", "role": stat.role, "hint": what})
         return RecordingResult(session, stats, warnings, issues)

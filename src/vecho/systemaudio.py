@@ -239,6 +239,7 @@ class SystemAudioRecorder:
         self._error: str | None = None
         self._stopping = False
         self._first_at: float | None = None
+        self._last_at: float | None = None
 
     def start(self) -> None:
         try:
@@ -324,6 +325,7 @@ class SystemAudioRecorder:
                 break
             if self._first_at is None:  # the chunk holds audio captured just before now
                 self._first_at = time.monotonic() - len(chunk) / 2 / rate
+            self._last_at = time.monotonic()
             data = carry + chunk
             usable = len(data) - (len(data) % 2)
             carry = data[usable:]
@@ -403,4 +405,5 @@ class SystemAudioRecorder:
             overflows=self.overflows,
             error=self._error,
             started_at=self._first_at,
+            ended_at=self._last_at,
         )
