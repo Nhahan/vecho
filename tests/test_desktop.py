@@ -64,3 +64,22 @@ def test_simultaneous_launches_start_only_one_app(config, monkeypatch):
     lock = desktop._instance_lock(config)  # released on exit
     assert lock is not None
     lock.close()
+
+
+def test_a_stop_signal_closes_the_window_and_helpers_can_still_be_stopped():
+    import os
+    import signal
+    import subprocess
+    import threading
+
+    closed = threading.Event()
+    window = type("Window", (), {"destroy": lambda self: closed.set()})()
+    restore = desktop._close_on_signal(window)
+    try:
+        helper = subprocess.Popen(["sleep", "30"])  # started while the app runs
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert closed.wait(5)
+        helper.terminate()  # not ignored: the stop signals are not blocked for children
+        assert helper.wait(5) == -signal.SIGTERM
+    finally:
+        restore()

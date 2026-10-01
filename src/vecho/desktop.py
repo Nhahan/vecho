@@ -26,6 +26,7 @@ _STOP_SIGNALS = {signal.SIGINT, signal.SIGTERM}
 WINDOW = "window"
 BROWSER = "browser"
 HEADLESS = "none"
+HANDOFF_WAIT = 30.0  # longer than quitting takes (App.shutdown waits up to 20 s)
 
 
 def _instance_file(config: Config) -> Path:
@@ -98,16 +99,42 @@ def _show_window(url: str) -> None:
     with contextlib.suppress(Exception):
         webview.settings["ALLOW_DOWNLOADS"] = True
     window = webview.create_window("vecho", url, width=1180, height=800, min_size=(720, 520))
-    if hasattr(signal, "sigwait"):
-        # The GUI event loop never returns to Python, so a normal signal handler would not run.
-        # The signals are blocked in every thread (see run()); this thread receives them and
-        # closes the window, which leads to the normal shutdown that saves a recording.
-        def close_on_signal() -> None:
-            signal.sigwait(_STOP_SIGNALS)
-            window.destroy()
+    main = threading.current_thread() is threading.main_thread()
+    restore = _close_on_signal(window) if os.name == "posix" and main else None
+    try:
+        webview.start()  # returns when the window is closed
+    finally:
+        if restore is not None:
+            restore()  # Ctrl+C works normally again while shutting down
 
-        threading.Thread(target=close_on_signal, name="vecho-signals", daemon=True).start()
-    webview.start()  # returns when the window is closed
+
+def _close_on_signal(window: Any) -> Any:
+    """Close the window on Ctrl+C or SIGTERM, which leads to the shutdown that saves a recording.
+
+    The GUI event loop never returns to Python, so a Python signal handler would not run;
+    the C-level handler still writes the signal to a wakeup pipe, which a thread watches.
+    (Blocking the signals instead would also block them in every helper process started
+    later, which inherit the mask: a capture helper would then ignore being told to stop.)
+    """
+    read_end, write_end = os.pipe()
+    os.set_blocking(write_end, False)
+    previous_fd = signal.set_wakeup_fd(write_end)
+    previous = {sig: signal.signal(sig, lambda *_: None) for sig in _STOP_SIGNALS}
+
+    def watch() -> None:
+        with contextlib.suppress(OSError):
+            if os.read(read_end, 1):
+                window.destroy()
+
+    threading.Thread(target=watch, name="vecho-signals", daemon=True).start()
+
+    def restore() -> None:
+        signal.set_wakeup_fd(previous_fd)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+        os.close(write_end)  # ends the watcher
+
+    return restore
 
 
 def _wait_for_signal(stop: threading.Event) -> None:
@@ -135,24 +162,22 @@ def run(
     out = out or sys.stderr
     stop = stop or threading.Event()
     lock = _instance_lock(config)
-    if lock is None:  # another vecho app owns this data directory
-        existing = None
-        for _ in range(50):  # it may still be starting up
-            existing = running_instance(config)
-            if existing:
-                break
-            time.sleep(0.1)
-        print(f"vecho is already running at {existing or 'another window'}", file=out)
-        if existing and mode != HEADLESS:
-            webbrowser.open(existing)
-        return 0
+    deadline = time.monotonic() + HANDOFF_WAIT
+    while lock is None:  # another vecho app owns this data directory
+        existing = running_instance(config)
+        if existing:
+            print(f"vecho is already running at {existing}", file=out)
+            if mode != HEADLESS:
+                webbrowser.open(existing)
+            return 0
+        if time.monotonic() > deadline:
+            print("another vecho app is still starting or quitting; try again", file=out)
+            return 1
+        time.sleep(0.2)  # it is starting up, or quitting (which can take a while)
+        lock = _instance_lock(config)
 
     if mode == "auto":
         mode = WINDOW if window_available() else BROWSER
-    if mode == WINDOW and hasattr(signal, "pthread_sigmask"):
-        # Before any thread starts, so that every thread inherits the mask (see _show_window).
-        signal.pthread_sigmask(signal.SIG_BLOCK, _STOP_SIGNALS)
-
     app = App(config)
     server = VechoHTTPServer(app, port)
     thread = threading.Thread(target=server.serve_forever, name="vecho-http", daemon=True)
@@ -162,20 +187,16 @@ def run(
 
     try:
         if mode == WINDOW:
-            try:
-                _show_window(server.url)
-            finally:
-                if hasattr(signal, "pthread_sigmask"):  # Ctrl+C works again while shutting down
-                    signal.pthread_sigmask(signal.SIG_UNBLOCK, _STOP_SIGNALS)
+            _show_window(server.url)
         else:
             if mode == BROWSER:
                 webbrowser.open(server.url)
                 print("Close with Ctrl+C.", file=out, flush=True)
             _wait_for_signal(stop)
     finally:
+        _clear_instance(config, app.token)  # a new launch now waits for the lock to free up
         app.shutdown()  # saves a recording that is still running
         server.shutdown()
         server.server_close()
-        _clear_instance(config, app.token)
         lock.close()
     return 0
