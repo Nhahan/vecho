@@ -1,9 +1,11 @@
+import time
 import wave
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
+from vecho import audio
 from vecho.audio import (
     InputDevice,
     Recorder,
@@ -220,3 +222,31 @@ def test_a_stream_that_never_stops_cannot_hang_the_recording(tmp_path, monkeypat
     assert stats.frames == 1600  # what was recorded is saved
     track._on_audio(np.ones((160, 1), dtype=np.int16), 160, None, None)  # late callback: ignored
     forever.set()
+
+
+def test_audio_that_stops_arriving_is_reported(tmp_path, monkeypatch):
+    """A device unplugged mid-recording: the track is cut short, not silent."""
+    monkeypatch.setattr(audio, "GAP_REPORT_SEC", 0.2)
+
+    class OneBlock:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def start(self):
+            self.callback(np.full((1600, 1), 3000, dtype=np.int16), 1600, None, None)
+
+        def abort(self):
+            pass
+
+        def close(self):
+            pass
+
+    device = audio.InputDevice(0, "Mic", 1, 16000.0)
+    track = audio.TrackRecorder(
+        "me", device, tmp_path / "me.wav", stream_factory=lambda d, r, c, cb: OneBlock(cb)
+    )
+    track.start()
+    time.sleep(0.6)
+    stats = track.stop()
+    assert stats.error and "disconnected" in stats.error
+    assert track.level == 0.0

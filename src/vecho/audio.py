@@ -12,6 +12,7 @@ import contextlib
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import wave
@@ -47,8 +48,19 @@ def _sounddevice() -> Any:
     return sounddevice
 
 
+def _refresh(sd: Any) -> None:
+    """PortAudio lists devices once, when it starts; restart it to see plugged-in changes.
+
+    Safe because this process never has a stream open (capture runs in a child process).
+    """
+    with contextlib.suppress(Exception):
+        sd._terminate()
+        sd._initialize()
+
+
 def list_input_devices() -> list[InputDevice]:
     sd = _sounddevice()
+    _refresh(sd)
     try:
         default_index = sd.default.device[0]
         raw = sd.query_devices()
@@ -126,7 +138,7 @@ class CaptureProcess:
     Behaves like a sounddevice stream: ``start()``, then ``callback(indata, frames, time,
     status)`` per block from a reader thread, then ``abort()``/``close()``. Stopping never
     hangs: a child that does not exit in time is killed, which also frees whatever PortAudio
-    left locked in it.
+    left locked in it. ``error`` says why capture ended early, if it did.
     """
 
     def __init__(
@@ -136,32 +148,52 @@ class CaptureProcess:
         open_timeout: float = OPEN_TIMEOUT,
     ) -> None:
         self._callback = callback
+        self._open_timeout = open_timeout
         self._reader: threading.Thread | None = None
+        self._stopping = False
+        self.error: str | None = None
+        # the child's stderr, for error messages; closed in abort()
+        self._log = tempfile.TemporaryFile()  # noqa: SIM115
         try:
             self._process = subprocess.Popen(
                 list(command),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=self._log,
+                start_new_session=True,  # Ctrl+C in a terminal is for vecho, which stops it
             )
         except OSError as exc:
+            self._log.close()
             raise AudioError(f"cannot start the capture process: {exc}") from exc
+        self._expect("OK", "the microphone did not respond; it may be in use or stuck")
+
+    def _expect(self, word: str, silent: str) -> None:
+        """Wait for the child's answer line; on anything else, kill it and raise."""
         answer: list[bytes] = []
-        waiter = threading.Thread(
-            target=lambda: answer.append(self._process.stdout.readline()),  # type: ignore[union-attr]
-            daemon=True,
-        )
+        stdout = self._process.stdout
+        assert stdout is not None
+        waiter = threading.Thread(target=lambda: answer.append(stdout.readline()), daemon=True)
         waiter.start()
-        waiter.join(open_timeout)
+        waiter.join(self._open_timeout)
         answered = list(answer)  # before a kill below ends the read with b""
         line = answered[0].decode("utf-8", "replace").strip() if answered else ""
-        if line != "OK":
-            self._kill()
-            if line.startswith("ERROR"):
-                raise AudioError(line[len("ERROR") :].strip() or "the device could not be opened")
-            if not answered:
-                raise AudioError("the microphone did not respond; it may be in use or stuck")
-            raise AudioError("the capture process ended unexpectedly")
+        if line == word:
+            return
+        self._kill()
+        if line.startswith("ERROR"):
+            raise AudioError(line[len("ERROR") :].strip() or "the device could not be used")
+        if not answered:
+            raise AudioError(silent)
+        raise AudioError(f"the capture process ended unexpectedly{self._why()}")
+
+    def _why(self) -> str:
+        """The last line the child printed to stderr, e.g. an import error."""
+        with contextlib.suppress(OSError, ValueError):
+            self._log.seek(0)
+            lines = self._log.read().decode("utf-8", "replace").strip().splitlines()
+            if lines:
+                return f": {lines[-1][:200]}"
+        return ""
 
     def start(self) -> None:
         stdin = self._process.stdin
@@ -172,6 +204,7 @@ class CaptureProcess:
         except OSError as exc:
             self._kill()
             raise AudioError(f"the capture process ended unexpectedly: {exc}") from exc
+        self._expect("STARTED", "the microphone did not start")
         self._reader = threading.Thread(target=self._read_loop, name="vecho-capture", daemon=True)
         self._reader.start()
 
@@ -181,12 +214,19 @@ class CaptureProcess:
         stdout = self._process.stdout
         assert stdout is not None
         while True:
-            header = stdout.read(HEADER.size)
-            if len(header) < HEADER.size:
+            try:
+                header = stdout.read(HEADER.size)
+                payload = b""
+                if len(header) == HEADER.size:
+                    count, flags = HEADER.unpack(header)
+                    payload = stdout.read(count * 2)
+            except (OSError, ValueError):  # closed by abort() after a stuck child was killed
                 return
-            count, flags = HEADER.unpack(header)
-            payload = stdout.read(count * 2)
-            if len(payload) < count * 2:
+            if len(header) < HEADER.size or len(payload) < count * 2:
+                if not self._stopping:  # the child died or the device went away
+                    code = self._process.poll()
+                    detail = f" (exit code {code})" if code else ""
+                    self.error = f"the microphone stopped{detail}{self._why()}"
                 return
             block = np.frombuffer(payload, dtype=np.int16).reshape(-1, 1)
             status = _CaptureStatus(bool(flags & OVERFLOW))
@@ -194,6 +234,7 @@ class CaptureProcess:
                 self._callback(block, count, None, status)
 
     def abort(self) -> None:
+        self._stopping = True
         with contextlib.suppress(OSError):
             if self._process.stdin is not None:
                 self._process.stdin.close()  # the child stops capturing and exits
@@ -203,10 +244,16 @@ class CaptureProcess:
             self._kill()
         if self._reader is not None:
             self._reader.join(STOP_TIMEOUT)
+        with contextlib.suppress(OSError):
+            if self._process.stdout is not None:
+                self._process.stdout.close()
+        with contextlib.suppress(OSError):
+            self._log.close()
 
     stop = close = abort
 
     def _kill(self) -> None:
+        self._stopping = True
         with contextlib.suppress(OSError):
             self._process.kill()
         with contextlib.suppress(subprocess.TimeoutExpired):
@@ -218,14 +265,23 @@ class _CaptureStatus:
     input_overflow: bool
 
 
-def _default_stream_factory(
-    device: int, samplerate: int, channels: int, callback: Callable[..., None]
+def _capture_factory(
+    device: int,
+    samplerate: int,
+    channels: int,
+    callback: Callable[..., None],
+    name: str | None = None,
 ) -> Any:
+    """Capture in a child process; ``name`` makes it refuse a different device at ``device``."""
     _sounddevice()  # fail early, with a clear message, when PortAudio is missing
-    args = [str(device), str(samplerate), str(channels)]
+    args = [str(device), str(samplerate), str(channels), *([name] if name else [])]
     return CaptureProcess([sys.executable, "-m", "vecho.miccapture", *args], callback)
 
 
+_default_stream_factory: StreamFactory = _capture_factory
+
+
+GAP_REPORT_SEC = 3.0  # this much audio missing at the end of a track is reported
 STREAM_CLOSE_TIMEOUT = 5.0  # covers CaptureProcess.abort (wait, kill, reader)
 
 
@@ -268,7 +324,7 @@ class TrackRecorder:
         self.device = device
         self.path = path
         self.sample_rate = sample_rate
-        self._factory = stream_factory or _default_stream_factory
+        self._factory = stream_factory
         self._queue: queue.Queue[bytes | None] = queue.Queue()
         self._stream: Any = None
         self._wav: wave.Wave_write | None = None
@@ -277,6 +333,8 @@ class TrackRecorder:
         self._write_error: Exception | None = None
         self._first_at: float | None = None
         self._closed = False
+        self._queued = 0  # samples received from the device
+        self._source_error: str | None = None
         self.level = 0.0
         self.peak = 0.0
         self.overflows = 0
@@ -291,7 +349,7 @@ class TrackRecorder:
         last_error: Exception | None = None
         for rate in rates:
             try:
-                self._stream = self._factory(self.device.index, rate, channels, self._on_audio)
+                self._stream = self._open(rate, channels)
                 self.sample_rate = rate
                 break
             except Exception as exc:
@@ -314,6 +372,14 @@ class TrackRecorder:
             self._teardown()
             raise AudioError(f"cannot start recording from '{self.device.name}': {exc}") from exc
 
+    def _open(self, rate: int, channels: int) -> Any:
+        if self._factory is not None:
+            return self._factory(self.device.index, rate, channels, self._on_audio)
+        factory = _default_stream_factory  # looked up now, so tests can replace it
+        if factory is _capture_factory:  # device numbers shift when devices come and go
+            return factory(self.device.index, rate, channels, self._on_audio, self.device.name)
+        return factory(self.device.index, rate, channels, self._on_audio)
+
     def _on_audio(self, indata: np.ndarray, frames: int, time_info: Any, status: Any) -> None:
         if self._closed:
             return
@@ -331,6 +397,7 @@ class TrackRecorder:
         level = int(np.abs(mono.astype(np.int32)).max()) / _INT16_FULL_SCALE
         self.level = level
         self.peak = max(self.peak, level)
+        self._queued += mono.size
         self._queue.put(mono.tobytes())
 
     def _write_loop(self) -> None:
@@ -348,9 +415,20 @@ class TrackRecorder:
 
     def _teardown(self) -> None:
         self._closed = True  # a callback still arriving from here on is ignored
+        stopped_at = time.monotonic()
         stream, self._stream = self._stream, None
         if stream is not None:
             _close_stream(stream, self.device.name)
+            self._source_error = self._source_error or getattr(stream, "error", None)
+            if self._source_error is None and self._first_at is not None:
+                # audio that stopped arriving (a device unplugged mid-recording) is not silence
+                missing = (stopped_at - self._first_at) - self._queued / self.sample_rate
+                if missing > GAP_REPORT_SEC:
+                    self._source_error = (
+                        f"no audio arrived for the last {missing:.0f} s; the device may have "
+                        "been disconnected"
+                    )
+        self.level = 0.0
         thread, self._thread = self._thread, None
         if thread is not None:
             self._queue.put(None)
@@ -374,7 +452,7 @@ class TrackRecorder:
             overflows=self.overflows,
             error=f"writing {self.path.name} failed: {self._write_error}"
             if self._write_error
-            else None,
+            else self._source_error,
             started_at=self._first_at,
         )
 
@@ -392,7 +470,7 @@ class Recorder:
             for track in self.tracks:
                 track.start()
                 started.append(track)
-        except Exception:
+        except BaseException:  # also Ctrl+C: never leave one track capturing
             for track in started:
                 with contextlib.suppress(Exception):
                     track.stop()

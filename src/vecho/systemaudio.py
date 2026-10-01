@@ -21,6 +21,7 @@ import contextlib
 import hashlib
 import os
 import platform
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -246,6 +247,8 @@ class SystemAudioRecorder:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=self._stderr,
+                # its own session: Ctrl+C in a terminal is for vecho, which then stops it
+                start_new_session=True,
             )
         except OSError as exc:
             raise AudioError(f"cannot start the system audio helper: {exc}") from exc
@@ -295,6 +298,23 @@ class SystemAudioRecorder:
         self._wav.setsampwidth(2)
         self._wav.setframerate(self.sample_rate)
 
+        # Disk writes happen on their own thread: if this loop stalls, the helper's pipe fills
+        # up, its audio callback blocks and Core Audio silently drops what it captured.
+        pending: queue.Queue[np.ndarray | None] = queue.Queue()
+        writer = threading.Thread(
+            target=self._write_loop, args=(pending,), name="vecho-tap-writer", daemon=True
+        )
+        writer.start()
+        try:
+            self._pump(proc, rate, pending)
+        finally:
+            pending.put(None)
+            writer.join()
+        if not self._stopping:
+            self._error = self._error or self._stderr_text() or "the helper exited unexpectedly"
+
+    def _pump(self, proc: subprocess.Popen[bytes], rate: int, pending: queue.Queue) -> None:
+        assert proc.stdout is not None
         decimator = Decimator(self._factor)
         carry = b""
         while True:
@@ -309,20 +329,20 @@ class SystemAudioRecorder:
             carry = data[usable:]
             body = decimator.process(np.frombuffer(data[:usable], dtype="<i2"))
             if len(body):
-                self._consume(body)
-        if not self._stopping:
-            self._error = self._stderr_text() or "the helper exited unexpectedly"
+                level = int(np.abs(body.astype(np.int32)).max()) / 32768.0
+                self.level = level
+                self.peak = max(self.peak, level)
+                pending.put(body)
 
-    def _consume(self, samples: np.ndarray) -> None:
-        level = int(np.abs(samples.astype(np.int32)).max()) / 32768.0
-        self.level = level
-        self.peak = max(self.peak, level)
-        assert self._wav is not None
-        try:
-            self._wav.writeframes(samples.tobytes())
-            self._frames += len(samples)
-        except OSError as exc:  # e.g. disk full
-            self._error = f"writing {self.path.name} failed: {exc}"
+    def _write_loop(self, pending: queue.Queue) -> None:
+        while (samples := pending.get()) is not None:
+            if self._wav is None or self._error is not None:
+                continue  # keep draining
+            try:
+                self._wav.writeframes(samples.tobytes())
+                self._frames += len(samples)
+            except OSError as exc:  # e.g. disk full
+                self._error = f"writing {self.path.name} failed: {exc}"
 
     def _kill(self) -> None:
         proc, self._proc = self._proc, None
