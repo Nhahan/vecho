@@ -49,6 +49,17 @@ Reply with concise bullet points and nothing else.
 Transcript part:
 {text}"""
 
+CONDENSE_PROMPT = """\
+These are notes {index} of {total}, taken in order from one long conversation. Rewrite them
+as shorter notes: keep every decision, action item (owner, deadline), number, name, date
+and open question; drop repetition and small talk. Keep the order. Reply with concise bullet
+points and nothing else.
+
+Notes:
+{text}"""
+
+MAX_CONDENSE_ROUNDS = 5
+
 # Section headings and the "nothing" word per language. Models often ignore an instruction to
 # translate headings, so known languages get them spelled out; others fall back to English
 # headings plus a translation request.
@@ -115,6 +126,8 @@ Write notes about the conversation by filling in the TEMPLATE below.
 Rules:
 - Keep every heading of the template with the same text, level and order. Do not add, drop,
   rename or renumber headings.
+- Text after "←" in a heading is an instruction for that section: follow it, but leave it
+  out of the heading you write.
 - Inside each section keep the template's shape: bold labels such as "**Label**", tables
   (same columns), numbered lists and sub-bullets.
 - The template may contain example content from a completely different conversation. It only
@@ -269,11 +282,11 @@ def summarize_lines(
 
     system = SYSTEM_PROMPT.format(language=language)
     custom = template is not None and not template.builtin and template.body.strip()
-    # The final prompt carries the template as well, so the transcript gets what is left of
-    # the budget (never less than a quarter of it).
+    # The final prompt carries the template as well, so what goes into it gets what is left
+    # of the budget (never less than a quarter of it). Notes are taken from full-size parts.
     budget = chunk_chars - (len(template.body) if custom and template is not None else 0)
     budget = max(chunk_chars // 4, budget)
-    chunks = transcript.split_into_chunks(lines, budget)
+    whole = transcript.split_into_chunks(lines, budget)
 
     def final(text: str, from_notes: bool) -> str:
         if not custom:
@@ -289,10 +302,12 @@ def summarize_lines(
         answer = strip_fences(client.chat(system, prompt.format(rules=rules, text=text)))
         return conform(drop_placeholders(remove_copied(answer, template.body)), template.body)
 
-    if len(chunks) == 1:
+    if len(whole) == 1:  # the transcript fits the final prompt as it is
         if on_progress:
             on_progress("summary", 1, 1)
-        return final(chunks[0], from_notes=False)
+        return final(whole[0], from_notes=False)
+
+    chunks = transcript.split_into_chunks(lines, chunk_chars)
 
     notes = []
     for number, chunk in enumerate(chunks, start=1):
@@ -302,16 +317,21 @@ def summarize_lines(
             client.chat(system, CHUNK_PROMPT.format(index=number, total=len(chunks), text=chunk))
         )
     joined = "\n\n".join(f"### Part {i}\n{note}" for i, note in enumerate(notes, start=1))
-    # Very long conversations: condense the notes again until they fit the budget.
+    # Very long conversations: condense the notes until they fit the final prompt, as long as
+    # condensing still makes them meaningfully shorter.
     rounds = 0
-    while len(joined) > budget and len(notes) > 1 and rounds < 3:
+    while len(joined) > budget and rounds < MAX_CONDENSE_ROUNDS:
         rounds += 1
-        groups = transcript.split_into_chunks(joined.splitlines(), budget)
+        groups = transcript.split_into_chunks(joined.splitlines(), chunk_chars)
         notes = [
-            client.chat(system, CHUNK_PROMPT.format(index=i, total=len(groups), text=group))
+            client.chat(system, CONDENSE_PROMPT.format(index=i, total=len(groups), text=group))
             for i, group in enumerate(groups, start=1)
         ]
-        joined = "\n\n".join(f"### Part {i}\n{note}" for i, note in enumerate(notes, start=1))
+        shorter = "\n\n".join(f"### Part {i}\n{note}" for i, note in enumerate(notes, start=1))
+        if len(shorter) > 0.9 * len(joined):
+            joined = shorter
+            break  # the model cannot condense further; send what there is
+        joined = shorter
     if on_progress:
         on_progress("summary", len(chunks), len(chunks))
     return final(joined, from_notes=True)

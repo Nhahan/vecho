@@ -478,3 +478,9 @@ def test_a_short_heading_never_pulls_content_into_an_unrelated_section():
 def test_code_blocks_keep_their_none_lines():
     text = "## 설정\n```\nproxy: none\n```"
     assert drop_placeholders(text) == text
+
+
+def test_a_heading_note_for_the_writer_is_left_out():
+    body = "## 4. 피드백 ← (작성 전의 경우, 작성 코칭 내용 기재)\n## 5. 숙제"
+    out = conform("## 4. 피드백\n이력서 수정\n\n## 5. 숙제\n- 제출", body)
+    assert out.startswith("## 4. 피드백\n\n이력서 수정")

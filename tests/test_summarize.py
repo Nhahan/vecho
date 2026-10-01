@@ -316,13 +316,14 @@ def test_notes_too_long_for_the_final_prompt_are_condensed_again(ollama):
     assert "short 1" in final_prompt and long_note not in final_prompt
 
 
-def test_a_long_template_shrinks_the_transcript_chunks(ollama):
+def test_a_transcript_that_no_longer_fits_beside_the_template_goes_through_notes(ollama):
     from vecho.templates import Template
 
     ollama.replies = ["notes"] * 10 + ["## A\n- x"]
     template = Template("긴 템플릿", "## A\n" + "- 예시\n" * 20)  # ~100 chars
     summarize_lines(["x" * 70] * 2, client_for(ollama), "Korean", 200, template=template)
-    assert "part 1 of 2" in ollama.requests[0]["messages"][1]["content"]  # 200-100 budget
+    # with the template the transcript no longer fits one prompt: notes first, from a full part
+    assert "part 1 of 1" in ollama.requests[0]["messages"][1]["content"]
 
 
 def test_strip_reasoning_handles_cut_off_and_half_tagged_blocks():
@@ -360,3 +361,10 @@ def test_the_timeout_covers_the_whole_answer():
         client.chat("system", "user")
     assert time.monotonic() - started < 2
     listener.close()
+
+
+def test_condensing_stops_when_the_notes_do_not_get_shorter(ollama):
+    ollama.replies = ["y" * 150] * 50  # a model that never shortens anything
+    summarize_lines(["x" * 150] * 6, client_for(ollama), "Korean", 200)
+    # 6 notes, then one condensing round that did not help, then the summary
+    assert len(ollama.requests) <= 6 + 6 + 1

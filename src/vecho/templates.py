@@ -395,6 +395,11 @@ def _split_sections(markdown: str) -> tuple[list[str], list[tuple[str, list[str]
     return preamble, sections
 
 
+def _without_note(heading: str) -> str:
+    """In "피드백 ← (작성 전이면 코칭 내용 기재)" the note after the arrow is for the writer."""
+    return re.sub(r"\s*(?:←|<-).*$", "", heading).strip() or heading
+
+
 def _contains(a: str, b: str) -> bool:
     shorter = min(a, b, key=len)
     if len(shorter) < 2 or shorter.isdigit():
@@ -507,7 +512,7 @@ def conform(summary: str, body: str) -> str:
         content = trimmed(own.get(index, []))
         added = trimmed(extra.get(index, []))
         if level == top or content:
-            out.append(f"{'#' * level} {text}")
+            out.append(f"{'#' * level} {_without_note(text)}")
             if content:
                 out += ["", *content]
             out.append("")
