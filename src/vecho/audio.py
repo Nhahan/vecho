@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import contextlib
 import queue
+import subprocess
+import sys
 import threading
 import time
 import wave
@@ -114,25 +116,127 @@ class TrackStats:
 StreamFactory = Callable[[int, int, int, Callable[..., None]], Any]
 
 
+OPEN_TIMEOUT = 15.0  # starting Python and opening the device
+STOP_TIMEOUT = 1.5
+
+
+class CaptureProcess:
+    """An input stream captured by a child process (see :mod:`vecho.miccapture`).
+
+    Behaves like a sounddevice stream: ``start()``, then ``callback(indata, frames, time,
+    status)`` per block from a reader thread, then ``abort()``/``close()``. Stopping never
+    hangs: a child that does not exit in time is killed, which also frees whatever PortAudio
+    left locked in it.
+    """
+
+    def __init__(
+        self,
+        command: Sequence[str],
+        callback: Callable[..., None],
+        open_timeout: float = OPEN_TIMEOUT,
+    ) -> None:
+        self._callback = callback
+        self._reader: threading.Thread | None = None
+        try:
+            self._process = subprocess.Popen(
+                list(command),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            raise AudioError(f"cannot start the capture process: {exc}") from exc
+        answer: list[bytes] = []
+        waiter = threading.Thread(
+            target=lambda: answer.append(self._process.stdout.readline()),  # type: ignore[union-attr]
+            daemon=True,
+        )
+        waiter.start()
+        waiter.join(open_timeout)
+        answered = list(answer)  # before a kill below ends the read with b""
+        line = answered[0].decode("utf-8", "replace").strip() if answered else ""
+        if line != "OK":
+            self._kill()
+            if line.startswith("ERROR"):
+                raise AudioError(line[len("ERROR") :].strip() or "the device could not be opened")
+            if not answered:
+                raise AudioError("the microphone did not respond; it may be in use or stuck")
+            raise AudioError("the capture process ended unexpectedly")
+
+    def start(self) -> None:
+        stdin = self._process.stdin
+        assert stdin is not None
+        try:
+            stdin.write(b"start\n")
+            stdin.flush()
+        except OSError as exc:
+            self._kill()
+            raise AudioError(f"the capture process ended unexpectedly: {exc}") from exc
+        self._reader = threading.Thread(target=self._read_loop, name="vecho-capture", daemon=True)
+        self._reader.start()
+
+    def _read_loop(self) -> None:
+        from .miccapture import HEADER, OVERFLOW
+
+        stdout = self._process.stdout
+        assert stdout is not None
+        while True:
+            header = stdout.read(HEADER.size)
+            if len(header) < HEADER.size:
+                return
+            count, flags = HEADER.unpack(header)
+            payload = stdout.read(count * 2)
+            if len(payload) < count * 2:
+                return
+            block = np.frombuffer(payload, dtype=np.int16).reshape(-1, 1)
+            status = _CaptureStatus(bool(flags & OVERFLOW))
+            with contextlib.suppress(Exception):  # like PortAudio: a bad callback ends nothing
+                self._callback(block, count, None, status)
+
+    def abort(self) -> None:
+        with contextlib.suppress(OSError):
+            if self._process.stdin is not None:
+                self._process.stdin.close()  # the child stops capturing and exits
+        try:
+            self._process.wait(STOP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self._kill()
+        if self._reader is not None:
+            self._reader.join(STOP_TIMEOUT)
+
+    stop = close = abort
+
+    def _kill(self) -> None:
+        with contextlib.suppress(OSError):
+            self._process.kill()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            self._process.wait(STOP_TIMEOUT)
+
+
+@dataclass(frozen=True)
+class _CaptureStatus:
+    input_overflow: bool
+
+
 def _default_stream_factory(
     device: int, samplerate: int, channels: int, callback: Callable[..., None]
 ) -> Any:
-    sd = _sounddevice()
-    return sd.InputStream(
-        device=device, samplerate=samplerate, channels=channels, dtype="int16", callback=callback
-    )
+    _sounddevice()  # fail early, with a clear message, when PortAudio is missing
+    args = [str(device), str(samplerate), str(channels)]
+    return CaptureProcess([sys.executable, "-m", "vecho.miccapture", *args], callback)
 
 
-STREAM_CLOSE_TIMEOUT = 3.0
+STREAM_CLOSE_TIMEOUT = 5.0  # covers CaptureProcess.abort (wait, kill, reader)
 
 
 def _close_stream(stream: Any, name: str, timeout: float | None = None) -> None:
     """Abort and close a PortAudio stream without ever hanging the caller.
 
-    On macOS, Pa_StopStream can block forever waiting for a callback that never comes (seen
-    when the audio system is busy re-routing). The recording must still be saved, so the
-    stream is shut down on a helper thread and abandoned if it does not finish in time.
-    abort() is used rather than stop(): it does not wait for queued buffers to drain.
+    Microphones are captured in a child process (:class:`CaptureProcess`), whose stop is
+    already bounded; this is a second line of defence for any other stream. The recording
+    must still be saved, so the stream is shut down on a helper thread and abandoned if it
+    does not finish in time. abort() is used rather than stop(): it does not wait for queued
+    buffers to drain.
     """
 
     def shut() -> None:
