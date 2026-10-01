@@ -124,7 +124,12 @@ def test_a_microphone_that_fails_to_start_is_reported(tmp_path, fake_portaudio):
 
 def test_a_capture_that_dies_mid_recording_is_reported(tmp_path, fake_portaudio):
     fake_portaudio.setenv("FAKE_MODE", "crash")
-    stats = record(tmp_path / "me.wav", seconds=0.6)
+    track = TrackRecorder("me", InputDevice(0, "Mic", 2, 16000.0), tmp_path / "me.wav")
+    track.start()
+    deadline = time.monotonic() + 10  # a cold first start can be slow
+    while track._stream.error is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    stats = track.stop()
     assert stats.error and "stopped" in stats.error and "exit code 3" in stats.error
 
 

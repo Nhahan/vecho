@@ -105,7 +105,8 @@ class Client:
         for key, value in (headers or {}).items():
             request.add_header(key, value)
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            # generous: the first playback of an odd WAV imports the decoder, slow when cold
+            with urllib.request.urlopen(request, timeout=60) as response:
                 payload = response.read()
                 status, response_headers = response.status, response.headers
         except urllib.error.HTTPError as exc:
