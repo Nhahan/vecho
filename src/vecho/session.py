@@ -143,6 +143,7 @@ class Session:
                 for key, value in on_disk.items():
                     if mine.get(key) == self._base.get(key):  # unchanged here: theirs wins
                         merged[key] = value
+            merged["id"] = self.dir.name  # the folder is the identity, whatever the file says
             for key, value in merged.items():
                 setattr(self.meta, key, value)
             write_atomic(path, json.dumps(merged, ensure_ascii=False, indent=2))

@@ -192,3 +192,17 @@ def test_damaged_metadata_fields_fall_back_to_defaults(tmp_path):
     assert (meta.title, meta.tracks, meta.duration_sec) == ("", {}, None)
     assert meta.offsets == {"remote": 0.5}
     assert meta.id == session.dir.name
+
+
+def test_saving_keeps_the_folder_name_as_the_id(tmp_path):
+    store = SessionStore(tmp_path)
+    original = store.create("회의")
+    copy = tmp_path / "사본"
+    import shutil
+
+    shutil.copytree(original.dir, copy)
+    session = Session.load(copy)
+    session.meta.title = "사본 회의"
+    session.save()
+    assert session.id == "사본"
+    assert json.loads((copy / "session.json").read_text("utf-8"))["id"] == "사본"
