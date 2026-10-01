@@ -157,8 +157,22 @@ async function api(path, { method = "GET", body, headers = {} } = {}) {
   let response;
   try { response = await fetch("/api/" + path, init); } catch { throw new Error(T.offline); }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error((data.code && T.errors[data.code]) || data.error || response.statusText);
+  if (!response.ok) {
+    if (data.code === "bad_token") reloadForNewToken();
+    const error = new Error((data.code && T.errors[data.code]) || data.error || response.statusText);
+    error.code = data.code;
+    throw error;
+  }
   return data;
+}
+
+// The app was restarted: its page carries the new token, so load it again (once in a while).
+function reloadForNewToken() {
+  let last = 0;
+  try { last = Number(sessionStorage.getItem("vecho:reloaded") || 0); } catch { /* private mode */ }
+  if (Date.now() - last < 10000) return;
+  try { sessionStorage.setItem("vecho:reloaded", String(Date.now())); } catch { /* private mode */ }
+  location.reload();
 }
 
 let toastTimer = 0;
@@ -281,10 +295,12 @@ function splitCells(row) {
 }
 
 function mdInline(text) {
-  return esc(text)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>");
+  // code spans are literal: no bold or italics inside them
+  return String(text).split(/(`[^`]+`)/).map((part, k) => k % 2
+    ? `<code>${esc(part.slice(1, -1))}</code>`
+    : esc(part)
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, "$1<em>$2</em>")).join("");
 }
 
 // Renders the Markdown a template summary uses: headings, lists (nested, ordered, tasks),
@@ -323,8 +339,12 @@ function renderMarkdown(md, id) {
       stack[stack.length - 1].children.push(item);
       stack.push(item);
     }
-    const html = (nodes) => {
-      if (!nodes.length) return "";
+    const html = (all) => {
+      if (!all.length) return "";
+      // bullets followed by numbers at the same level are two lists
+      const cut = all.findIndex((n) => n.ordered !== all[0].ordered);
+      if (cut > 0) return html(all.slice(0, cut)) + html(all.slice(cut));
+      const nodes = all;
       const tag = nodes[0].ordered ? "ol" : "ul";
       const start = nodes[0].ordered && nodes[0].start > 1 ? ` start="${nodes[0].start}"` : "";
       return `<${tag}${start}>` + nodes.map((n) => {
@@ -469,7 +489,8 @@ async function select(id, { keepScroll = false, auto = false } = {}) {
   if (!id) { detail = null; render(); return; }
   let fresh = null;
   try { fresh = await api("sessions/" + encodeURIComponent(id)); }
-  catch {
+  catch (e) {
+    if (e.code !== "session_missing") { if (id === selected) toast(e.message, true); return; }
     if (id === selected && !page) {  // gone (e.g. deleted elsewhere): don't keep showing another
       selected = null; saved.set("selected", null); detail = null;
       renderList(); render({ newSession: true });
@@ -648,6 +669,14 @@ function progressHtml(job) {
     </div>${tab === "summary" ? skeleton : ""}`;
 }
 
+// The template a new summary of this session would use (a deleted one falls back to the built-in).
+function templateShown(d) {
+  const names = (templateData.templates || []).map((t) => t.name);
+  if (d.template && names.includes(d.template)) return d.template;
+  if (d.template) return names[0] || T.templateLabel;
+  return templateData.default || T.templateLabel;
+}
+
 function noticeHtml(kind, title, text, action) {
   return `<div class="notice ${kind}">${icon("alert")}<div><strong>${esc(title)}</strong>${text ? `<small>${esc(text)}</small>` : ""}</div>
     ${action ? `<button class="btn" type="button" data-act="${action[0]}">${esc(action[1])}</button>` : "<span></span>"}</div>`;
@@ -673,7 +702,7 @@ function renderSession(opts) {
   const meta = [...people];
   if (d.llm_model && d.summary) meta.push(`<span class="sep"></span><span>${esc(T.summarizedWith(d.llm_model))}</span>`);
   if (d.tracks.length) {
-    meta.push(`<span class="sep"></span><button class="tpl-chip" type="button" data-act="tplmenu" ${locked ? "disabled" : ""}>${icon("template")}${esc(d.template || templateData.default || T.templateLabel)}${icon("chevron")}</button>`);
+    meta.push(`<span class="sep"></span><button class="tpl-chip" type="button" data-act="tplmenu" ${locked ? "disabled" : ""}>${icon("template")}${esc(templateShown(d))}${icon("chevron")}</button>`);
   }
 
   let status = "";
@@ -681,7 +710,7 @@ function renderSession(opts) {
   else if (job && job.stage === "error") status = noticeHtml("error", T.failed, `${job.error} ${T.kept}`, ["retry", T.retry]);
   else if (d.status === "recorded") status = noticeHtml("", T.pending, "", ["retry", T.processNow]);
   else if (d.status === "transcribed") status = noticeHtml("", T.noSummary, "", ["resummarize", T.processNow]);
-  const issues = (d.issues || []).filter((i) => i.code !== "too_short" || d.status !== "summarized")
+  const issues = (d.issues || []).filter((i) => (i.code !== "too_short" || d.status !== "summarized") && issueTitle(i))
     .map((i) => noticeHtml("", issueTitle(i), issueDetail(i), i.code === "bad_transcript" && !working && d.tracks.length ? ["retry", T.retry] : null)).join("");
 
   let body = "";
@@ -733,6 +762,7 @@ function bindTitle(d) {
     try {
       const fresh = await api("sessions/" + encodeURIComponent(d.id), { method: "PATCH", body: { title: value } });
       if (detail && detail.id === d.id) detail = fresh;
+      title.textContent = fresh.title;  // as saved (long titles are shortened)
       toast(T.saved); refreshList();
     } catch (e) { toast(e.message, true); title.textContent = current(); }
   });
@@ -753,8 +783,10 @@ async function loadTemplates() {
   select.value = templateData.default;
 }
 $("templateSelect").addEventListener("change", async () => {
-  try { templateData = await api(`templates/${encodeURIComponent($("templateSelect").value)}/default`, { method: "POST" }); }
-  catch (e) { toast(e.message, true); }
+  try {
+    templateData = await api(`templates/${encodeURIComponent($("templateSelect").value)}/default`, { method: "POST" });
+    if (page === "templates") render();  // its "default" badge
+  } catch (e) { toast(e.message, true); }
 });
 $("templatesBtn").title = T.templatesTip;
 $("templatesBtn").setAttribute("aria-label", T.templatesTip);
@@ -832,6 +864,7 @@ function renderTemplateEditor(name) {
   $("tplCancel").addEventListener("click", () => { editorDirty = false; page = "templates"; render(); });
   $("tplSave").addEventListener("click", async () => {
     const newName = $("tplName").value.trim();
+    if (/^\.+$/.test(newName)) { toast(T.errors.template_name_bad, true); return; }  // not a URL part
     try {
       templateData = await api(`templates/${encodeURIComponent(newName)}`, { method: "PUT", body: { body: $("tplBody").value, previous: name } });
       await loadTemplates();
@@ -885,7 +918,11 @@ async function act(name) {
     else if (name === "tplmenu") openTemplateMenu();
     else if (name === "resummarize" || name === "retry") forgetChecks(d.id);
     if (name === "resummarize") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "summarize" } }); render({ keepScroll: true }); refreshList(); }
-    if (name === "retry") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "all" } }); render({ keepScroll: true }); refreshList(); }
+    if (name === "retry") {
+      // a failed summary is retried without transcribing the whole recording again
+      const step = d.job && d.job.stage === "error" && d.job.failed_in === "summarizing" ? "summarize" : "all";
+      detail = await api(`sessions/${id}/process`, { method: "POST", body: { step } }); render({ keepScroll: true }); refreshList();
+    }
     else if (name === "delete") {
       if (!(await confirmDialog(T.delTitle, T.delBody, T.confirmDel))) return;
       await api(`sessions/${id}`, { method: "DELETE" });
@@ -894,7 +931,10 @@ async function act(name) {
       await refreshList();
       select(sessions.length ? sessions[0].id : null);
     }
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    toast(e.message, true);
+    if (e.code === "session_missing") { await refreshList(); select(null); }
+  }
 }
 
 document.addEventListener("click", (e) => {
@@ -903,7 +943,7 @@ document.addEventListener("click", (e) => {
   const tabBtn = e.target.closest("[data-tab]");
   if (tabBtn) { tab = tabBtn.dataset.tab; saved.set("tab", tab); render({ keepScroll: true }); return; }
   const seek = e.target.closest("[data-seek]");
-  if (seek) { const a = $("audio"); a.currentTime = parseFloat(seek.dataset.seek); a.play(); return; }
+  if (seek) { const a = $("audio"); a.currentTime = parseFloat(seek.dataset.seek); a.play().catch(() => {}); return; }
   if (!e.target.closest("#menu")) closeMenu();
 });
 $("view").addEventListener("change", (e) => {
@@ -1057,8 +1097,15 @@ function highlightTurn() {
   if (!turns.length) return;
   let current = null;
   if (!audio.paused || audio.currentTime > 0) turns.forEach((t) => { if (parseFloat(t.dataset.start) <= audio.currentTime + 0.05) current = t; });
-  turns.forEach((t) => t.classList.toggle("now", t === current && !audio.paused));
+  turns.forEach((t) => t.classList.toggle("now", t === current));
+  if (current && current !== followed && !audio.paused && Date.now() - userScrolled > 4000) {
+    const box = current.getBoundingClientRect();
+    if (box.bottom < 0 || box.top > window.innerHeight - 120) current.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+  followed = current;
 }
+let followed = null, userScrolled = 0;
+["wheel", "touchmove"].forEach((ev) => window.addEventListener(ev, () => { userScrolled = Date.now(); }, { passive: true }));
 
 function seekTo(clientX) {
   const rect = $("timeline").getBoundingClientRect(), total = totalTime();
@@ -1075,7 +1122,13 @@ $("timeline").addEventListener("keydown", (e) => {
   if (e.key === "ArrowLeft") { audio.currentTime = Math.max(0, audio.currentTime - 5); updatePlayer(); }
 });
 ["timeupdate", "play", "pause", "loadedmetadata", "seeked"].forEach((ev) => audio.addEventListener(ev, updatePlayer));
-$("playBtn").addEventListener("click", () => { audio.paused ? audio.play() : audio.pause(); });
+$("playBtn").addEventListener("click", () => { audio.paused ? audio.play().catch(() => {}) : audio.pause(); });
+audio.addEventListener("error", () => {
+  if (!audio.getAttribute("src")) return;
+  toast(T.errors.no_audio, true);
+  audio.pause();
+  updatePlayer();
+});
 $("speedBtn").addEventListener("click", () => {
   speedIndex = (speedIndex + 1) % speeds.length;
   audio.playbackRate = speeds[speedIndex];
@@ -1124,7 +1177,8 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") closeMenu();
   const typing = e.target.closest("input, textarea, select, [contenteditable], #menu");
   if (typing || e.metaKey || e.ctrlKey || e.altKey || $("dialog").open) return;
-  if (e.key === " " && e.target.closest("button, a, [role=slider]")) return;  // let Space press it
+  // Space presses a focused button, except the transcript's time stamps: there it plays/pauses
+  if (e.key === " " && e.target.closest("button, a") && !e.target.closest(".stamp")) return;
   if (e.key === "/") { e.preventDefault(); $("search").focus(); }
   else if (e.key === "r" || e.key === "R") { e.preventDefault(); state.recording ? stopRecording() : startRecording(); }
   else if (e.key === " " && !$("player").hidden) { e.preventDefault(); $("playBtn").click(); }
@@ -1132,7 +1186,14 @@ document.addEventListener("keydown", (e) => {
 
 /* ================================================================ polling */
 
-let failures = 0;
+let failures = 0, lastSweep = Date.now();
+function patchProgress(job) {
+  const pct = Math.round((job.progress || 0) * 100);
+  const bar = document.querySelector(".progress-row .bar i");
+  if (bar) bar.style.width = pct + "%";
+  const label = document.querySelector(".progress-row .pct");
+  if (label) label.textContent = pct + "%";
+}
 async function poll() {
   try {
     state = await api("state");
@@ -1140,18 +1201,29 @@ async function poll() {
     renderRecorder();
     if ($("homeStart")) $("homeStart").hidden = !!state.recording;
     const jobs = Object.values(state.jobs);
-    const signature = JSON.stringify(jobs.map((j) => [j.session_id, j.stage, Math.round(j.progress * 25)]));
+    const signature = JSON.stringify(jobs.map((j) => [j.session_id, j.stage]));
+    const mine = selected && state.jobs[selected];
+    if (mine && detail && detail.id === selected && detail.job && detail.job.stage === mine.stage) {
+      detail.job = mine;
+      patchProgress(mine);  // progress only: no need to rebuild a long transcript
+    }
     const editingTitle = document.activeElement && document.activeElement.id === "title";
-    if (signature !== jobSignature && !editingTitle) {  // retried after the title loses focus
+    const sweep = Date.now() - lastSweep > 12000;  // now and then: changes made in another tab
+    if ((signature !== jobSignature || sweep) && !editingTitle) {
+      lastSweep = Date.now();
       const finished = jobs.filter((j) => j.stage === "done" && !jobSignature.includes(`"${j.session_id}","done"`));
+      const changed = signature !== jobSignature;
       jobSignature = signature;
       await refreshList();
       const sid = selected;
-      if (sid && !page) {
+      if (sid && !page && !sessions.some((s) => s.id === sid)) select(null);  // deleted elsewhere
+      else if (sid && !page && (changed || sweep)) {
         try {
           const fresh = await api("sessions/" + encodeURIComponent(sid));
-          if (sid === selected && !page) { detail = fresh; render({ keepScroll: true }); }
-        } catch { /* deleted elsewhere */ }
+          if (sid === selected && !page && JSON.stringify(fresh) !== JSON.stringify(detail)) {
+            detail = fresh; render({ keepScroll: true });
+          }
+        } catch { /* gone: the next list refresh notices */ }
       }
       if (finished.length && document.hidden && "Notification" in window && Notification.permission === "granted") {
         new Notification("vecho", { body: `${T.summary} ✓` });

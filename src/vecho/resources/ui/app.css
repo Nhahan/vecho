@@ -518,7 +518,8 @@ kbd {
   .tips li { grid-template-columns: 1fr; gap: 2px; }
 }
 @media (max-width: 760px) {
-  .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; height: auto; min-height: 100vh; }
+  .app { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; height: auto; min-height: 100vh; }
+  .rail, .main { min-width: 0; }
   .rail { border-right: 0; border-bottom: 1px solid var(--rule); }
   .list { max-height: 30vh; }
   .rail-foot { display: none; }
