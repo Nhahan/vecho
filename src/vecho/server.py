@@ -39,7 +39,11 @@ from .transcribe import engine_label
 MAX_UPLOAD_BYTES = 2 * 1024**3
 MIX_FILE = "mix.wav"
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".ogg", ".opus", ".flac", ".webm", ".mp4"}
-_SESSION_ID = re.compile(r"^[\w.\-]+$")
+
+
+def _is_folder_name(name: str) -> bool:
+    """One path component: any folder in the sessions directory (even "회의 copy") but no path."""
+    return bool(name) and name not in {".", ".."} and not set(name) & {"/", "\\", "\0"}
 
 
 class NotFound(VechoError):
@@ -93,6 +97,8 @@ class App:
         self._uploading: set[str] = set()
         self._settled = threading.Condition(self._lock)
         self._starting = False
+        self._starting_id: str | None = None  # the session a start is creating
+        self._closing = False
         self._mix_lock = threading.Lock()
 
     # -- recording --------------------------------------------------------------------------
@@ -102,6 +108,8 @@ class App:
     ) -> dict[str, Any]:
         template = self._template_name(template)
         with self._lock:
+            if self._closing:
+                raise Conflict("the app is quitting", "session_busy")
             if self._live is not None or self._starting:
                 raise Conflict("a recording is already running", "already_recording")
             self._starting = True
@@ -109,14 +117,18 @@ class App:
             # Outside the lock: the first start may build the capture helper, which takes a
             # while, and nothing else (status polls, quitting) should wait for that.
             live = recording.LiveRecording(self.config, title=title.strip(), mic_only=mic_only)
+            with self._lock:
+                self._starting_id = live.session.id  # shown as recording: not deletable
             live.session.meta.template = template  # saved by start()
             live.start()
             with self._lock:
                 self._live = live
                 self._issues[live.session.id] = []
         finally:
-            with self._lock:
+            with self._settled:
                 self._starting = False
+                self._starting_id = None
+                self._settled.notify_all()  # quitting waits for a start to finish
         return self.state()
 
     def stop_recording(self) -> dict[str, Any]:
@@ -128,15 +140,7 @@ class App:
             raise Conflict("nothing is being recorded", "not_recording")
         # (quitting waits for _stopping to empty; see shutdown())
         try:
-            result = live.stop()
-            session = result.session
-            issues = self._issues.setdefault(session.id, [])
-            issues.extend(result.issues)
-            processing = not result.too_short
-            if not processing:
-                issues.append({"code": "too_short", "role": "", "hint": ""})
-            session.meta.issues = issues
-            session.save()
+            session, issues, processing = self._finish(live)
             if processing:
                 self.processor.submit(session, "all")
         finally:
@@ -149,16 +153,34 @@ class App:
             "processing": processing,
         }
 
+    def _finish(self, live: recording.LiveRecording) -> tuple[Session, list[dict[str, str]], bool]:
+        """Stop a recording and save what is known about it; returns whether to process it."""
+        result = live.stop()
+        session = result.session
+        issues = self._issues.setdefault(session.id, [])
+        issues.extend(result.issues)
+        processing = not result.too_short
+        if not processing:
+            issues.append({"code": "too_short", "role": "", "hint": ""})
+        session.meta.issues = issues
+        session.save()
+        return session, issues, processing
+
     def shutdown(self, wait: float = 20.0) -> None:
         """Keep whatever is being recorded when the app quits.
 
-        A stop that is still finishing (it can take several seconds) is waited for, so its
-        session is saved and queued rather than cut off halfway.
+        A start or stop that is still in progress (either can take several seconds) is waited
+        for, so its session is saved rather than cut off halfway or left recording.
         """
-        with self._lock:
+        with self._settled:
+            self._closing = True
+            self._settled.wait_for(lambda: not self._starting, timeout=wait)
             live, self._live = self._live, None
         if live is not None:
-            live.abort()
+            try:
+                self._finish(live)  # processed from the app's list on the next launch
+            except Exception:
+                live.abort()
         with self._settled:
             self._settled.wait_for(lambda: not self._stopping, timeout=wait)
         self.processor.shutdown()
@@ -184,8 +206,7 @@ class App:
 
     def _session(self, session_id: str) -> Session:
         if (
-            not _SESSION_ID.match(session_id)
-            or session_id in {".", ".."}
+            not _is_folder_name(session_id)
             or len(session_id.encode("utf-8")) > 255  # longer than any file name can be
         ):
             raise NotFound("no such session", "session_missing")
@@ -196,7 +217,11 @@ class App:
 
     def _status(self, session: Session) -> str:
         live = self._live
-        if (live is not None and live.session.id == session.id) or session.id in self._stopping:
+        if (
+            (live is not None and live.session.id == session.id)
+            or session.id in self._stopping
+            or session.id == self._starting_id
+        ):
             return "recording"
         job = self.processor.state(session.id)
         if (job is not None and job.active) or session.id in self._uploading:
@@ -354,8 +379,18 @@ class App:
                 raise templates.TemplateError(
                     f"a template named '{name}' already exists", "template_exists"
                 )
-        self.templates.save(name, body, previous)
+        saved = self.templates.save(name, body, previous)
+        if previous is not None and saved.name != previous:
+            self._follow_rename(previous, saved.name)
         return self.list_templates()
+
+    def _follow_rename(self, old: str, new: str) -> None:
+        """Sessions that chose a template keep it when it is renamed."""
+        for session in self.store.list():
+            if session.meta.template == old:
+                session.meta.template = new
+                with contextlib.suppress(VechoError, OSError):
+                    session.save()
 
     def delete_template(self, name: str) -> dict[str, Any]:
         self.templates.delete(name)

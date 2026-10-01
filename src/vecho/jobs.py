@@ -17,7 +17,7 @@ from typing import Any
 from . import transcript
 from .config import Config
 from .errors import VechoError
-from .session import TRANSCRIPT_JSON, Session
+from .session import SUMMARY_MD, TRANSCRIPT_JSON, Session
 from .summarize import summarize_session
 from .transcribe import MlxTranscriber, Transcriber, make_transcriber, transcribe_session
 
@@ -57,6 +57,14 @@ def has_speech(session: Session) -> bool:
         return False
 
 
+def _forget_summary(session: Session) -> None:
+    session.path_for(SUMMARY_MD).unlink(missing_ok=True)
+    if session.meta.summarized_at or session.meta.summary_template:
+        session.meta.summarized_at = None
+        session.meta.summary_template = None
+        session.save()
+
+
 class Processor:
     def __init__(
         self,
@@ -86,9 +94,15 @@ class Processor:
                 return current  # already queued or running: its template stays as it was
             state = JobState(session.id, step)
             self._states[session.id] = state
-        if template is not None and template != session.meta.template:
-            session.meta.template = template
-            session.save()
+        try:
+            if template is not None and template != session.meta.template:
+                session.meta.template = template
+                session.save()
+        except BaseException:
+            with self._lock:  # never leave a job that will not run marked as active
+                if self._states.get(session.id) is state:
+                    del self._states[session.id]
+            raise
         self._queue.put((session, state))
         return state
 
@@ -171,7 +185,8 @@ class Processor:
                 on_progress=transcribe_progress,
             )
         if state.step == "all" and not has_speech(session):
-            return  # nothing was said: there is nothing to summarize
+            _forget_summary(session)  # nothing was said: an older summary no longer applies
+            return
         if state.step in ("all", "summarize"):
             self._set(state, stage=SUMMARIZING, progress=0.0)
 

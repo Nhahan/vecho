@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from vecho import audio, jobs, systemaudio
+from vecho import audio, jobs, recording, systemaudio
 from vecho.audio import InputDevice
 from vecho.errors import SummarizationError
 from vecho.server import App, VechoHTTPServer, summary_body, tldr_of
@@ -901,3 +901,90 @@ def test_malformed_requests_get_a_clear_answer(served):
     assert status == 400 and answer["error"] == "invalid JSON"
     status, answer, _ = client.call("PUT", "/api/templates/a", raw=b" " * (3 << 20))
     assert status == 400 and answer["code"] == "request_too_large"  # not a connection reset
+
+
+# ---- races and state ------------------------------------------------------------------------
+
+
+def test_quitting_while_a_recording_starts_still_saves_it(served, mic, monkeypatch):
+    app, client = served
+    entered, release = threading.Event(), threading.Event()
+    real_start = recording.LiveRecording.start
+
+    def slow_start(self):
+        entered.set()
+        release.wait(5)
+        real_start(self)
+
+    monkeypatch.setattr(recording.LiveRecording, "start", slow_start)
+    starter = threading.Thread(target=lambda: client.call("POST", "/api/record/start", {}))
+    starter.start()
+    assert entered.wait(5)
+    session_id = app.store.list()[0].id
+    assert client.call("DELETE", f"/api/sessions/{session_id}")[0] == 409  # still starting
+    quitter = threading.Thread(target=app.shutdown)
+    quitter.start()
+    time.sleep(0.1)
+    release.set()
+    starter.join(5)
+    quitter.join(10)
+    assert app._live is None  # nothing left capturing
+    session = app.store.list()[0]
+    assert session.meta.duration_sec is not None  # stopped and saved, not abandoned
+
+
+def test_quitting_mid_recording_keeps_its_issues(served, mic):
+    app, client = served
+    client.call("POST", "/api/record/start", {"mic_only": True})
+    app.shutdown()  # nothing was said: silent and too short
+    codes = {i["code"] for i in app.store.list()[0].meta.issues}
+    assert {"silent", "too_short"} <= codes
+
+
+def test_a_failed_save_does_not_leave_the_session_busy(served, monkeypatch):
+    app, client = served
+    session = make_session(app, summary=False)
+    app.templates.save("회의록", "## 요약\n")
+
+    def full(self):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Session, "save", full)
+    status, _, _ = client.call(
+        "POST", f"/api/sessions/{session.id}/process", {"template": "회의록"}
+    )
+    assert status == 500
+    monkeypatch.undo()
+    assert client.call("DELETE", f"/api/sessions/{session.id}")[0] == 200
+
+
+def test_reprocessing_without_speech_drops_the_old_summary(served, monkeypatch):
+    app, client = served
+    session = make_session(app)
+
+    def silent(session, config, transcriber=None, on_progress=None):
+        save_segments(session.path_for("transcript.json"), [], "ko", "tiny")
+
+    monkeypatch.setattr(app.processor, "_transcribe", silent)
+    client.call("POST", f"/api/sessions/{session.id}/process", {"step": "all"})
+    assert app.processor.wait_idle()
+    _, detail, _ = client.call("GET", f"/api/sessions/{session.id}")
+    assert detail["summary"] == "" and detail["status"] == "empty"
+
+
+def test_renaming_a_template_keeps_it_for_sessions_that_chose_it(served):
+    app, client = served
+    app.templates.save("회의록", "## 요약\n")
+    session = make_session(app, summary=False)
+    session.meta.template = "회의록"
+    session.save()
+    client.call("PUT", "/api/templates/주간 회의록", {"body": "## 요약\n", "previous": "회의록"})
+    assert Session.load(session.dir).meta.template == "주간 회의록"
+
+
+def test_a_session_folder_with_spaces_can_be_opened_and_deleted(served):
+    app, client = served
+    original = make_session(app, "원본")
+    shutil.copytree(original.dir, app.store.root / f"{original.id} copy")
+    assert client.call("GET", f"/api/sessions/{original.id} copy")[0] == 200
+    assert client.call("DELETE", f"/api/sessions/{original.id} copy")[0] == 200
