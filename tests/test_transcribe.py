@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from vecho.errors import TranscriptionError
@@ -32,7 +33,10 @@ def make_session(tmp_path, tracks):
 
 
 def transcriber_for(model):
-    return Transcriber("tiny", "int8", model_factory=lambda name, compute: model)
+    # straight from the file (the speech joining is tested with real audio below)
+    return Transcriber(
+        "tiny", "int8", model_factory=lambda name, compute: model, speech_filter=False
+    )
 
 
 def test_transcribe_session_merges_tracks_and_writes_artifacts(tmp_path, config):
@@ -116,7 +120,9 @@ def test_decoding_failure_is_wrapped(tmp_path):
         def transcribe(self, path, **kwargs):
             raise ValueError("corrupt audio")
 
-    transcriber = Transcriber("tiny", model_factory=lambda name, compute: Exploding())
+    transcriber = Transcriber(
+        "tiny", model_factory=lambda name, compute: Exploding(), speech_filter=False
+    )
     with pytest.raises(TranscriptionError, match="corrupt audio"):
         transcriber.transcribe(tmp_path / "x.wav", "me")
 
@@ -128,7 +134,7 @@ def test_model_is_loaded_once(tmp_path):
         loads.append(name)
         return FakeModel({"a.wav": [], "b.wav": []})
 
-    transcriber = Transcriber("tiny", model_factory=factory)
+    transcriber = Transcriber("tiny", model_factory=factory, speech_filter=False)
     transcriber.transcribe(tmp_path / "a.wav", "me")
     transcriber.transcribe(tmp_path / "b.wav", "remote")
     assert loads == ["tiny"]
@@ -250,7 +256,8 @@ def test_mlx_maps_times_back_and_splits_at_pauses(tmp_path, monkeypatch):
 
     # one speech chunk that really began at 10 s
     timeline = SpeechTimeline([{"start": 160000, "end": 240000}], 16000)
-    monkeypatch.setattr(tr, "speech_windows", lambda audio: [(audio[:100], timeline)])
+    silence = np.zeros(100, np.float32)
+    monkeypatch.setattr(tr, "speech_windows", lambda path: [(silence, timeline)])
     seen = {}
 
     def fake_mlx(audio, **kwargs):
@@ -396,11 +403,21 @@ def test_long_speech_is_transcribed_in_windows_with_progress(tmp_path, monkeypat
     from vecho import transcribe as tr
 
     path = tmp_path / "me.wav"
-    path.write_bytes(b"")  # decoding is replaced below: 2500 s, speech in 25 one-minute chunks
-    chunks = [{"start": k * 16000 * 100, "end": k * 16000 * 100 + 16000 * 60} for k in range(25)]
-    audio = np.zeros(16000 * 2500, dtype=np.float32)
-    monkeypatch.setattr("faster_whisper.decode_audio", lambda *a, **k: audio)
-    monkeypatch.setattr("faster_whisper.vad.get_speech_timestamps", lambda a, options: chunks)
+    # 2500 s of audio read in blocks; in each, a minute of speech every 100 s
+    monkeypatch.setattr(
+        tr,
+        "_audio_blocks",
+        lambda src: (np.zeros(16000 * n, np.float32) for n in (600,) * 4 + (100,)),
+    )
+    monkeypatch.setattr(tr, "_duration", lambda p: 2500.0)
+    monkeypatch.setattr(
+        tr,
+        "_detect_speech",
+        lambda audio: [
+            {"start": k * 1_600_000, "end": k * 1_600_000 + 960_000}
+            for k in range(len(audio) // 1_600_000)
+        ],
+    )
     calls = []
 
     def fake_mlx(joined, **kwargs):
@@ -414,3 +431,62 @@ def test_long_speech_is_transcribed_in_windows_with_progress(tmp_path, monkeypat
     assert len(calls) == 3 and all(seconds <= tr.WINDOW_SEC for seconds, _ in calls)
     assert [language for _, language in calls] == [None, "ko", "ko"]  # detected once
     assert progress == sorted(progress) and len(progress) >= 4
+
+
+def test_speech_across_a_block_boundary_stays_one_chunk(monkeypatch):
+    import numpy as np
+
+    from vecho import transcribe as tr
+
+    def runs(audio):  # "speech" is wherever the signal is not zero
+        loud = np.flatnonzero(np.diff(np.concatenate([[0], (audio != 0).astype(int), [0]])))
+        return [
+            {"start": int(a), "end": int(b)} for a, b in zip(loud[::2], loud[1::2], strict=True)
+        ]
+
+    monkeypatch.setattr(tr, "_detect_speech", runs)
+    monkeypatch.setattr(tr, "VAD_BLOCK_SEC", 600.0)
+    audio = np.zeros(16000 * 1300, np.float32)
+    audio[16000 * 590 : 16000 * 610] = 0.5  # said across the 600 s mark
+    audio[16000 * 1000 : 16000 * 1010] = 0.5
+    ((joined, timeline),) = tr.speech_windows(audio, window=10_000)
+    assert [(round(o), round(o + e - s)) for s, e, o in timeline.spans] == [
+        (590, 610),
+        (1000, 1010),
+    ]
+
+
+def test_the_cpu_engine_transcribes_only_speech_and_maps_it_back(tmp_path, monkeypatch):
+    import wave
+
+    from vecho import transcribe as tr
+
+    path = tmp_path / "me.wav"
+    audio = np.zeros(16000 * 30, np.int16)
+    audio[16000 * 20 : 16000 * 25] = 3000  # said 20 s in
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(audio.tobytes())
+
+    def runs(block):
+        loud = np.flatnonzero(np.diff(np.concatenate([[0], (block != 0).astype(int), [0]])))
+        return [
+            {"start": int(a), "end": int(b)} for a, b in zip(loud[::2], loud[1::2], strict=True)
+        ]
+
+    monkeypatch.setattr(tr, "_detect_speech", runs)
+    seen = {}
+
+    class Model:
+        def transcribe(self, joined, **kwargs):
+            seen.update(kwargs, seconds=len(joined) / 16000)
+            word = SimpleNamespace(start=0.1, end=0.6, word=" 안녕하세요")
+            raw = SimpleNamespace(start=0.0, end=0.6, text=" 안녕하세요", words=[word])
+            return iter([raw]), SimpleNamespace(language="ko", duration=len(joined) / 16000)
+
+    result = Transcriber("tiny", model_factory=lambda n, c: Model()).transcribe(path, "me")
+    assert seen["seconds"] == pytest.approx(5.0) and seen["vad_filter"] is False
+    assert [(s.start, s.text) for s in result.segments] == [(20.1, "안녕하세요")]
+    assert result.language == "ko" and result.duration == pytest.approx(30.0)

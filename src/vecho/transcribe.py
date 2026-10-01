@@ -11,7 +11,8 @@ from __future__ import annotations
 import importlib.util
 import math
 import platform
-from collections.abc import Callable
+import wave
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,11 +82,15 @@ class Transcriber:
         model_name: str,
         compute_type: str = "int8",
         model_factory: ModelFactory | None = None,
+        speech_filter: bool = True,
     ) -> None:
         self.model_name = model_name
         self.compute_type = compute_type
         self._factory = model_factory or _default_model_factory
         self._model: Any = None
+        # Our own speech joining (see speech_windows); faster-whisper's built-in VAD joins
+        # chunks without a gap, which detaches a sentence's first word from it.
+        self._speech_filter = speech_filter
 
     def _load(self) -> Any:
         if self._model is None:
@@ -105,6 +110,8 @@ class Transcriber:
         on_progress: ProgressCallback | None = None,
     ) -> TrackTranscription:
         model = self._load()
+        if self._speech_filter:
+            return self._transcribe_speech(model, path, role, language, on_progress)
         try:
             raw_segments, info = model.transcribe(
                 str(path),
@@ -128,6 +135,61 @@ class Transcriber:
         except Exception as exc:
             raise TranscriptionError(f"transcribing {path.name} failed: {exc}") from exc
         return TrackTranscription(segments, getattr(info, "language", None), duration)
+
+    def _transcribe_speech(
+        self,
+        model: Any,
+        path: Path,
+        role: str,
+        language: str | None,
+        on_progress: ProgressCallback | None,
+    ) -> TrackTranscription:
+        try:
+            duration = _duration(path)
+            if on_progress:
+                on_progress(role, 0.0, duration)
+            windows = speech_windows(path)
+            segments: list[Segment] = []
+            detected = language
+            for joined, timeline in windows:
+                raw_segments, info = model.transcribe(
+                    joined,
+                    language=detected,
+                    beam_size=5,
+                    vad_filter=False,  # only speech is left
+                    condition_on_previous_text=False,
+                    word_timestamps=True,
+                )
+                for raw in raw_segments:
+                    words = [(float(w.start), float(w.end), w.word) for w in raw.words or []]
+                    segments += _placed(timeline, raw.start, raw.end, raw.text, words, role)
+                detected = detected or getattr(info, "language", None)
+                if on_progress:
+                    on_progress(role, min(timeline.reached, duration), duration)
+        except TranscriptionError:
+            raise
+        except Exception as exc:
+            raise TranscriptionError(f"transcribing {path.name} failed: {exc}") from exc
+        if on_progress:
+            on_progress(role, duration, duration)
+        return TrackTranscription(segments, detected if windows else None, duration)
+
+
+def _placed(
+    timeline: SpeechTimeline,
+    start: float,
+    end: float,
+    text: str,
+    words: list[tuple[float, float, str]],
+    role: str,
+) -> list[Segment]:
+    """One recognized segment of joined speech, mapped back to the recording."""
+    placed = timeline.place_words(words)
+    if placed:
+        first, last = placed[0].start, placed[-1].end
+    else:
+        first, last = timeline.to_original(float(start), float(end))
+    return split_at_pauses(SimpleNamespace(start=first, end=last, text=text, words=placed), role)
 
 
 SAMPLE_RATE = 16000
@@ -177,6 +239,12 @@ class SpeechTimeline:
             self.spans.append((position, position + length, chunk["start"] / rate))
             position += length + gap
 
+    @property
+    def reached(self) -> float:
+        """Where in the recording the last chunk ends."""
+        joined_start, joined_end, original = self.spans[-1]
+        return original + joined_end - joined_start
+
     def chunk_of(self, start: float, end: float) -> tuple[int, bool]:
         """The chunk holding the span's midpoint (or the nearest one), and whether it was in a gap.
 
@@ -221,38 +289,106 @@ class SpeechTimeline:
         return placed
 
 
+VAD_BLOCK_SEC = 600.0  # audio is read and searched for speech in blocks this long
+
+
+def _audio_blocks(source: Any, seconds: float = VAD_BLOCK_SEC) -> Iterator[Any]:
+    """16 kHz float32 audio in blocks: from an array, a 16 kHz mono WAV (read as it goes) or
+    any other file (decoded first)."""
+    import numpy as np
+
+    size = int(seconds * SAMPLE_RATE)
+    if isinstance(source, np.ndarray):
+        for first in range(0, len(source), size):
+            yield source[first : first + size]
+        return
+    path = Path(source)
+    try:
+        with wave.open(str(path)) as wav:
+            plain = (wav.getframerate(), wav.getnchannels(), wav.getsampwidth()) == (
+                SAMPLE_RATE,
+                1,
+                2,
+            )
+            while plain:
+                frames = wav.readframes(size)
+                if not frames:
+                    return
+                yield np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
+    except (wave.Error, EOFError):
+        pass  # not a plain WAV (an imported recording): decode it as a whole
+    from faster_whisper import decode_audio
+
+    yield from _audio_blocks(decode_audio(str(path), sampling_rate=SAMPLE_RATE), seconds)
+
+
+def _detect_speech(audio: Any) -> list[dict[str, int]]:
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    return get_speech_timestamps(audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=400))
+
+
 def speech_windows(
-    audio: Any, gap: float = CHUNK_GAP_SEC, window: float = WINDOW_SEC
+    source: Any, gap: float = CHUNK_GAP_SEC, window: float = WINDOW_SEC
 ) -> list[tuple[Any, SpeechTimeline]]:
-    """Only the speech in ``audio`` (Silero VAD), joined into windows, with maps back to time.
+    """Only the speech in ``source`` (Silero VAD), joined into windows, with maps back to time.
 
     Whisper invents text for silence ("감사합니다", "Thank you."), and on a per-speaker track
     one side is silent most of the time. Joining just the speech removes the silence Whisper
     would hallucinate on while keeping the sentences together for context. Each window holds
     about ``window`` seconds of speech (whole chunks), so long recordings report progress.
+
+    ``source`` is an array or an audio file; files are searched block by block and only the
+    speech is kept, so memory does not grow with the length of the recording.
     """
     import numpy as np
-    from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-    chunks = get_speech_timestamps(
-        audio, VadOptions(min_silence_duration_ms=500, speech_pad_ms=400)
-    )
-    groups: list[list[dict[str, int]]] = []
+    found: list[tuple[dict[str, int], Any]] = []  # (chunk in original samples, its audio)
+    carry = np.zeros(0, dtype=np.float32)  # speech running into the next block
+    offset = 0  # original position of the current block's first sample
+    edge = int(0.5 * SAMPLE_RATE)
+    blocks = _audio_blocks(source)
+    block = next(blocks, None)
+    while block is not None:
+        upcoming = next(blocks, None)
+        audio = np.concatenate([carry, block]) if len(carry) else block
+        chunks = _detect_speech(audio) if len(audio) else []
+        carry = np.zeros(0, dtype=np.float32)
+        if (
+            upcoming is not None
+            and chunks
+            and chunks[-1]["end"] >= len(audio) - edge
+            and chunks[-1]["start"] > 0  # never carry a whole block on
+        ):
+            last = chunks.pop()  # unfinished: searched again together with the next block
+            carry = audio[last["start"] :].copy()
+        for chunk in chunks:
+            found.append(
+                (
+                    {"start": offset + chunk["start"], "end": offset + chunk["end"]},
+                    audio[chunk["start"] : chunk["end"]].copy(),
+                )
+            )
+        offset += len(audio) - len(carry)
+        block = upcoming
+
+    groups: list[list[tuple[dict[str, int], Any]]] = []
     length = 0.0
-    for chunk in chunks:
-        size = (chunk["end"] - chunk["start"]) / SAMPLE_RATE + gap
+    for chunk, audio in found:
+        size = len(audio) / SAMPLE_RATE + gap
         if not groups or length + size > window:
             groups.append([])
             length = 0.0
-        groups[-1].append(chunk)
+        groups[-1].append((chunk, audio))
         length += size
-    silence = np.zeros(int(gap * SAMPLE_RATE), dtype=audio.dtype)
+    silence = np.zeros(int(gap * SAMPLE_RATE), dtype=np.float32)
     windows = []
     for group in groups:
         pieces = []
-        for chunk in group:
-            pieces += [audio[chunk["start"] : chunk["end"]], silence]
-        windows.append((np.concatenate(pieces[:-1]), SpeechTimeline(group, SAMPLE_RATE, gap)))
+        for _, audio in group:
+            pieces += [audio, silence]
+        timeline = SpeechTimeline([chunk for chunk, _ in group], SAMPLE_RATE, gap)
+        windows.append((np.concatenate(pieces[:-1]), timeline))
     return windows
 
 
@@ -260,6 +396,25 @@ def speech_only(audio: Any, gap: float = CHUNK_GAP_SEC) -> tuple[Any, SpeechTime
     """All speech in ``audio`` as one window (see :func:`speech_windows`)."""
     windows = speech_windows(audio, gap, window=float("inf"))
     return windows[0] if windows else None
+
+
+def _duration(path: Path) -> float:
+    try:
+        with wave.open(str(path)) as wav:
+            return wav.getnframes() / wav.getframerate()
+    except (wave.Error, EOFError, OSError):
+        pass
+    try:  # an imported recording: its container knows (decoding it just for this is costly)
+        import av
+
+        with av.open(str(path)) as container:
+            if container.duration:
+                return container.duration / 1_000_000
+    except Exception:
+        pass
+    from faster_whisper.audio import decode_audio
+
+    return len(decode_audio(str(path), sampling_rate=SAMPLE_RATE)) / SAMPLE_RATE
 
 
 class MlxTranscriber:
@@ -287,14 +442,10 @@ class MlxTranscriber:
         on_progress: ProgressCallback | None = None,
     ) -> TrackTranscription:
         try:
-            from faster_whisper import decode_audio
-
-            audio = decode_audio(str(path), sampling_rate=SAMPLE_RATE)
-            duration = len(audio) / SAMPLE_RATE
+            duration = _duration(path)
             if on_progress:
                 on_progress(role, 0.0, duration)
-            windows = speech_windows(audio)
-            del audio
+            windows = speech_windows(path)
             segments: list[Segment] = []
             detected = language
             for joined, timeline in windows:
@@ -309,8 +460,7 @@ class MlxTranscriber:
                 detected = detected or result.get("language")  # the same for every window
                 segments += self._segments(result, timeline, role)
                 if on_progress:
-                    reached = timeline.spans[-1][2] + timeline.spans[-1][1] - timeline.spans[-1][0]
-                    on_progress(role, min(reached, duration), duration)
+                    on_progress(role, min(timeline.reached, duration), duration)
         except TranscriptionError:
             raise
         except Exception as exc:
@@ -323,21 +473,10 @@ class MlxTranscriber:
     def _segments(result: dict[str, Any], timeline: SpeechTimeline, role: str) -> list[Segment]:
         segments: list[Segment] = []
         for raw in result.get("segments", []):
-            words = timeline.place_words(
-                [
-                    (float(w["start"]), float(w["end"]), str(w["word"]))
-                    for w in raw.get("words") or []
-                ]
-            )
-            if words:
-                start, end = words[0].start, words[-1].end
-            else:
-                start, end = timeline.to_original(float(raw["start"]), float(raw["end"]))
-            segments.extend(
-                split_at_pauses(
-                    SimpleNamespace(start=start, end=end, text=raw["text"], words=words), role
-                )
-            )
+            words = [
+                (float(w["start"]), float(w["end"]), str(w["word"])) for w in raw.get("words") or []
+            ]
+            segments += _placed(timeline, raw["start"], raw["end"], raw["text"], words, role)
         return segments
 
 
