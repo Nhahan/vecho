@@ -83,24 +83,26 @@ def cmd_record(args: argparse.Namespace, config: Config) -> int:
     if template:
         live.session.meta.template = template  # saved by start()
     live.start()
-    try:
-        _eprint(f"Recording to {live.session.dir}")
-        for role, source in live.sources:
-            _eprint(f"  {config.label_for(role)}: {recording.describe_source(source)}")
-        _eprint("Press Ctrl+C to stop.")
-        _wait_for_stop(live.recorder, config)
-    except BaseException:
-        # Finalize the WAV files even when interrupted before the stop handler was installed.
-        live.abort()
-        raise
-    result = live.stop()
-    session = result.session
-    issues = list(result.issues)
-    if result.too_short:
-        issues.append({"code": "too_short", "role": "", "hint": ""})
-    if issues:  # the app explains these when the session is opened there
-        session.meta.issues = issues
-        session.save()
+    # Until everything is saved, another Ctrl+C must not cut the stop short.
+    with _stop_on_signal(threading.Event()):
+        try:
+            _eprint(f"Recording to {live.session.dir}")
+            for role, source in live.sources:
+                _eprint(f"  {config.label_for(role)}: {recording.describe_source(source)}")
+            _eprint("Press Ctrl+C to stop.")
+            _wait_for_stop(live.recorder, config)
+        except BaseException:
+            # Finalize the WAV files even when interrupted before the stop handler was set.
+            live.abort()
+            raise
+        result = live.stop()
+        session = result.session
+        issues = list(result.issues)
+        if result.too_short:
+            issues.append({"code": "too_short", "role": "", "hint": ""})
+        if issues:  # the app explains these when the session is opened there
+            session.meta.issues = issues
+            session.save()
 
     _eprint(f"Saved {format_duration(session.meta.duration_sec)} of audio.")
     for warning in result.warnings:
@@ -381,7 +383,15 @@ def cmd_templates(args: argparse.Namespace, config: Config) -> int:
     if action == "add":
         if not args.file:
             raise SessionError("give the Markdown file: vecho templates add NAME FILE")
-        body = Path(args.file).expanduser().read_text(encoding="utf-8")
+        source = Path(args.file).expanduser()
+        try:
+            raw = source.read_bytes()
+        except OSError as exc:
+            raise SessionError(f"cannot read {source}: {exc.strerror or exc}") from exc
+        try:
+            body = raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            body = raw.decode("cp949", errors="replace")  # e.g. saved by Korean Windows tools
         saved = store.save(name, body)
         names = [text for _, text in templates.headings(saved.body)]
         more = " …" if len(names) > 6 else ""

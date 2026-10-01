@@ -476,3 +476,12 @@ def test_list_shows_sessions_without_speech(isolated_home, capsys):
     save_segments(session.path_for("transcript.json"), [], "ko", "t")
     assert cli.main(["list"]) == 0
     assert "no speech" in capsys.readouterr().out
+
+
+def test_templates_add_reports_unreadable_files(tmp_path, capsys):
+    assert cli.main(["templates", "add", "회의록", str(tmp_path / "없음.md")]) != 0
+    assert "cannot read" in capsys.readouterr().err
+    legacy = tmp_path / "옛 양식.md"
+    legacy.write_bytes("## 요약\n".encode("cp949"))
+    assert cli.main(["templates", "add", "옛 양식", str(legacy)]) == 0
+    assert "요약" in capsys.readouterr().out
