@@ -17,7 +17,7 @@ import re
 import tempfile
 import unicodedata
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .errors import VechoError
@@ -39,6 +39,7 @@ class Template:
     name: str
     body: str
     builtin: bool = False
+    path: Path | None = field(default=None, compare=False)  # the file it was read from
 
 
 def _check_name(name: str) -> str:
@@ -100,11 +101,17 @@ class TemplateStore:
     def list(self) -> list[Template]:
         found = []
         if self.root.is_dir():
+            # a rename interrupted between setting the old file aside and writing the new one
+            for aside in self.root.glob(".*.md.renaming"):
+                original = aside.with_name(aside.name[1 : -len(".renaming")])
+                if not original.exists():
+                    with contextlib.suppress(OSError):
+                        os.replace(aside, original)
             for path in sorted(self.root.glob("*.md"), key=lambda p: _name_of(p).lower()):
                 try:
                     # a file saved in another encoding still lists (and can be fixed or deleted)
                     body = path.read_text("utf-8", errors="replace")
-                    found.append(Template(_name_of(path), body))
+                    found.append(Template(_name_of(path), body, path=path))
                 except OSError:
                     continue
         return [Template(BUILTIN_NAME, "", builtin=True), *found]
@@ -150,13 +157,17 @@ class TemplateStore:
         was_default = previous is not None and self.default_name() == previous
         old = aside = None
         try:
-            if previous and previous != name and self.get(previous).name == previous:
+            # look everything up before moving files: list() restores an interrupted rename
+            current = self.get(name)  # an edit goes to the file the template came from
+            target = current.path if current.name == name and current.path else self._path(name)
+            listed = self.get(previous) if previous and previous != name else None
+            if listed is not None and listed.name == previous and listed.path is not None:
                 # Set the old file aside rather than deleting it: a failed write puts it back.
                 # (This also covers renames that only change letter case.)
-                old = self._path(previous)
+                old = listed.path
                 aside = old.with_name(f".{old.name}.renaming")
                 os.replace(old, aside)
-            write_text_atomic(self._path(name), body + "\n")
+            write_text_atomic(target, body + "\n")
         except OSError as exc:
             if old is not None and aside is not None and aside.exists():
                 with contextlib.suppress(OSError):
@@ -169,13 +180,19 @@ class TemplateStore:
                 aside.unlink()
         if was_default:
             self.set_default(name)
-        return Template(name, body + "\n")
+        return Template(name, body + "\n", path=target)
 
     def delete(self, name: str) -> None:
         name = _same_name(name)
-        if self.get(name).name != name:
+        template = self.get(name)
+        if template.name != name or template.path is None:
             raise TemplateError(f"no template named '{name}'", "template_missing")
-        self._path(name).unlink()
+        try:
+            template.path.unlink()
+        except OSError as exc:
+            raise TemplateError(
+                f"could not delete the template: {exc}", "template_save_failed"
+            ) from exc
         if self.default_name() == name:
             self.set_default(BUILTIN_NAME)
 
@@ -331,8 +348,14 @@ def drop_placeholders(summary: str) -> str:
     table row made only of fillers is dropped.
     """
     kept = []
+    in_code = False
     for line in summary.splitlines():
         stripped = line.strip()
+        if stripped.startswith("```"):
+            in_code = not in_code
+        if in_code or stripped.startswith("```"):
+            kept.append(line)  # code is quoted as is
+            continue
         if stripped.startswith("|") and not re.fullmatch(r"\|?[\s:|-]+\|?", stripped):
             cells = [c.strip() for c in stripped.strip("|").split("|")]
             if all(not c or _is_placeholder(c) for c in cells):
@@ -370,6 +393,13 @@ def _split_sections(markdown: str) -> tuple[list[str], list[tuple[str, list[str]
         else:
             preamble.append(line)
     return preamble, sections
+
+
+def _contains(a: str, b: str) -> bool:
+    shorter = min(a, b, key=len)
+    if len(shorter) < 2 or shorter.isdigit():
+        return False
+    return a in b or b in a
 
 
 def _key(text: str) -> str:
@@ -444,12 +474,13 @@ def conform(summary: str, body: str) -> str:
         order = [*range(current + 1, len(keys)), *range(0, current + 1)]
         index = next((i for i in order if key and keys[i] == key and i not in own), -1)
         if index == -1:
-            # fuzzy: a template heading contained in the model's heading or vice versa
+            # fuzzy: a template heading contained in the model's heading or vice versa; only
+            # ahead (a reworded heading keeps its place) and never on a scrap like "2"
             index = next(
                 (
                     i
-                    for i in order
-                    if keys[i] and key and i not in own and (keys[i] in key or key in keys[i])
+                    for i in range(current + 1, len(keys))
+                    if i not in own and _contains(keys[i], key)
                 ),
                 -1,
             )

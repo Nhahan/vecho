@@ -454,3 +454,27 @@ def test_a_template_in_another_encoding_still_lists(tmp_path):
     (tmp_path / ".default").write_bytes("옛 양식".encode("cp949"))
     assert [t.name for t in store.list()] == [BUILTIN_NAME, "옛 양식"]
     assert store.default_name() == BUILTIN_NAME
+
+
+def test_a_template_file_named_with_a_percent_sign_can_be_edited_and_deleted(tmp_path):
+    (tmp_path / "Q3 100%.md").write_text("## A\n", "utf-8")
+    store = TemplateStore(tmp_path)
+    store.save("Q3 100%", "## B\n", previous="Q3 100%")
+    assert [(t.name, t.body) for t in store.list()][1:] == [("Q3 100%", "## B\n")]
+    store.delete("Q3 100%")
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_an_interrupted_rename_is_recovered(tmp_path):
+    (tmp_path / ".회의록.md.renaming").write_text("## A\n", "utf-8")
+    assert [t.name for t in TemplateStore(tmp_path).list()][1:] == ["회의록"]
+
+
+def test_a_short_heading_never_pulls_content_into_an_unrelated_section():
+    out = conform("## 리스크\n### 2\n인력 2명 추가", "## 2025 목표\n## 리스크")
+    assert out.index("## 리스크") < out.index("인력 2명 추가")
+
+
+def test_code_blocks_keep_their_none_lines():
+    text = "## 설정\n```\nproxy: none\n```"
+    assert drop_placeholders(text) == text
