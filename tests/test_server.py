@@ -988,3 +988,17 @@ def test_a_session_folder_with_spaces_can_be_opened_and_deleted(served):
     shutil.copytree(original.dir, app.store.root / f"{original.id} copy")
     assert client.call("GET", f"/api/sessions/{original.id} copy")[0] == 200
     assert client.call("DELETE", f"/api/sessions/{original.id} copy")[0] == 200
+
+
+def test_a_wrong_token_is_reported_with_a_code(served):
+    status, body, _ = served[1].call("GET", "/api/state", token=False)
+    assert status == 403 and body["code"] == "bad_token"  # the page reloads for a new one
+
+
+def test_a_failed_job_says_which_stage_failed(served):
+    app, client = served
+    session = make_session(app, "boom", summary=False)  # fake_summarize fails for "boom"
+    client.call("POST", f"/api/sessions/{session.id}/process", {"step": "all"})
+    assert app.processor.wait_idle()
+    job = client.call("GET", f"/api/sessions/{session.id}")[1]["job"]
+    assert (job["stage"], job["failed_in"]) == ("error", "summarizing")

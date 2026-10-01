@@ -785,7 +785,7 @@ class Handler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not found")
             return
         if not self._token_ok(query):
-            self._error(HTTPStatus.FORBIDDEN, "missing or wrong token")
+            self._error(HTTPStatus.FORBIDDEN, "missing or wrong token", "bad_token")
             return
         # Split before decoding, so a "/" inside a name ("a%2Fb") stays part of that name.
         parts = [urllib.parse.unquote(p) for p in raw_path[len("/api/") :].strip("/").split("/")]

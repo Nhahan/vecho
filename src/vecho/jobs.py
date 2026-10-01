@@ -39,6 +39,7 @@ class JobState:
     stage: str = QUEUED
     progress: float = 0.0  # 0..1 within the current stage
     error: str = ""
+    failed_in: str = ""  # the stage that failed, so a retry can start there
     finished_at: float | None = None
 
     @property
@@ -154,14 +155,15 @@ class Processor:
                 self._process(session, state)
                 self._set(state, stage=DONE, progress=1.0, finished_at=time.time())
             except VechoError as exc:
-                self._set(state, stage=ERROR, error=str(exc), finished_at=time.time())
+                self._fail(state, str(exc))
             except Exception as exc:  # never let one bad file kill the worker
-                self._set(
-                    state, stage=ERROR, error=f"unexpected error: {exc}", finished_at=time.time()
-                )
+                self._fail(state, f"unexpected error: {exc}")
             if self._on_finish is not None:
                 with contextlib.suppress(Exception):  # notifications are best-effort
                     self._on_finish(state)
+
+    def _fail(self, state: JobState, error: str) -> None:
+        self._set(state, failed_in=state.stage, stage=ERROR, error=error, finished_at=time.time())
 
     def _process(self, session: Session, state: JobState) -> None:
         if state.step in ("all", "transcribe"):
