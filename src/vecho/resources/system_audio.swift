@@ -101,10 +101,30 @@ guard status == noErr else {
     abort("cannot create the capture device (CoreAudio error \(status))")
 }
 
+// The audio callback never waits on the pipe: if the parent is slow to read, a blocked
+// callback makes Core Audio silently drop what it captured. Samples go into a buffer that
+// holds a minute of audio, and a writer thread empties it. Should it ever fill up, the
+// missing stretch is sent as silence later, so the track keeps its length and alignment.
+let capacity = max(Int(format.mSampleRate), 1) * 60
+let ring = UnsafeMutablePointer<Int16>.allocate(capacity: capacity)
+var ringStart = 0  // oldest unsent sample
+var ringCount = 0
+var pendingSilence = 0  // samples lost to a full buffer, sent as zeros in their place
+let ringLock = NSLock()
+let ringReady = DispatchSemaphore(value: 0)
+
 // Audio is only sent after the "RATE" line, which is only sent once capturing really started.
-let outputLock = NSLock()
 var announced = false
 var outputBroken = false
+
+func push(_ sample: Int16) {
+    if pendingSilence > 0 || ringCount == capacity {
+        pendingSilence += 1
+        return
+    }
+    ring[(ringStart + ringCount) % capacity] = sample
+    ringCount += 1
+}
 
 let queue = DispatchQueue(label: "vecho.audio")
 status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, queue) {
@@ -116,7 +136,18 @@ status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, queue) {
     let frames = Int(first.mDataByteSize) / MemoryLayout<Float>.size / (nonInterleaved ? 1 : max(channels, 1))
     guard frames > 0, channels > 0 else { return }
 
-    var pcm = [Int16](repeating: 0, count: frames)
+    ringLock.lock()
+    if !announced || outputBroken {
+        ringLock.unlock()
+        return
+    }
+    if pendingSilence > 0 && capacity - ringCount >= pendingSilence {
+        for _ in 0..<pendingSilence {  // room again: the lost stretch goes in as silence
+            ring[(ringStart + ringCount) % capacity] = 0
+            ringCount += 1
+        }
+        pendingSilence = 0
+    }
     for frame in 0..<frames {
         var sum: Float = 0
         if nonInterleaved {
@@ -130,15 +161,10 @@ status = AudioDeviceCreateIOProcIDWithBlock(&procID, aggregateID, queue) {
             for channel in 0..<channels { sum += samples[frame * channels + channel] }
         }
         let mixed = max(-1, min(1, sum / Float(channels)))
-        pcm[frame] = Int16(mixed * 32767)
+        push(Int16(mixed * 32767))
     }
-    outputLock.lock()
-    defer { outputLock.unlock() }
-    guard announced, !outputBroken else { return }
-    if !pcm.withUnsafeBytes({ writeAll(Data($0)) }) {
-        outputBroken = true  // the parent is gone: stop cleanly
-        DispatchQueue.main.async { shutDown() }
-    }
+    ringLock.unlock()
+    ringReady.signal()
 }
 guard status == noErr else {
     procID = nil
@@ -148,11 +174,33 @@ status = AudioDeviceStart(aggregateID, procID)
 guard status == noErr else { abort("cannot start capturing (error \(status))") }
 running = true
 
-outputLock.lock()
-let told = writeAll(Data("RATE \(Int(format.mSampleRate))\n".utf8))
-announced = told
-outputLock.unlock()
-if !told { abort("the parent process is gone") }
+if !writeAll(Data("RATE \(Int(format.mSampleRate))\n".utf8)) { abort("the parent process is gone") }
+ringLock.lock()
+announced = true
+ringLock.unlock()
+
+// Empties the buffer into the pipe; only this thread writes audio to stdout.
+Thread.detachNewThread {
+    let chunk = UnsafeMutablePointer<Int16>.allocate(capacity: capacity)
+    while true {
+        ringReady.wait()
+        ringLock.lock()
+        let count = ringCount
+        for index in 0..<count { chunk[index] = ring[(ringStart + index) % capacity] }
+        ringStart = (ringStart + count) % capacity
+        ringCount = 0
+        ringLock.unlock()
+        if count == 0 { continue }
+        let data = Data(bytesNoCopy: chunk, count: count * 2, deallocator: .none)
+        if !writeAll(data) {
+            ringLock.lock()
+            outputBroken = true  // the parent is gone: stop cleanly
+            ringLock.unlock()
+            DispatchQueue.main.async { shutDown() }
+            return
+        }
+    }
+}
 
 func shutDown() -> Never {
     cleanUp()
