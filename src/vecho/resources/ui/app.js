@@ -664,7 +664,7 @@ function progressHtml(job) {
   const skeleton = `<div class="skeleton"><i class="head w40"></i><i class="gap"></i><i></i><i class="w90"></i><i class="w60"></i><i class="gap"></i><i class="w25"></i><i class="w75"></i><i class="w60"></i></div>`;
   return `<div class="progress-row">
       <div class="progress-label"><span class="spin"></span>${esc(T[job.stage])}${showPct ? `<span class="pct">${pct}%</span>` : ""}</div>
-      ${job.stage === "transcribing" && pct === 0 ? `<p class="progress-sub">${esc(T.firstRun)}</p>` : ""}
+      ${job.stage === "transcribing" && job.downloading && pct === 0 ? `<p class="progress-sub">${esc(T.firstRun)}</p>` : ""}
       <div class="bar ${loose ? "loose" : ""}"><i data-pct="${pct}"></i></div>
     </div>${tab === "summary" ? skeleton : ""}`;
 }

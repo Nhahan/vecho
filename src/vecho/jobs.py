@@ -19,7 +19,13 @@ from .config import Config
 from .errors import VechoError
 from .session import SUMMARY_MD, TRANSCRIPT_JSON, Session
 from .summarize import summarize_session
-from .transcribe import MlxTranscriber, Transcriber, make_transcriber, transcribe_session
+from .transcribe import (
+    MlxTranscriber,
+    Transcriber,
+    make_transcriber,
+    model_cached,
+    transcribe_session,
+)
 
 QUEUED = "queued"
 TRANSCRIBING = "transcribing"
@@ -40,6 +46,7 @@ class JobState:
     progress: float = 0.0  # 0..1 within the current stage
     error: str = ""
     failed_in: str = ""  # the stage that failed, so a retry can start there
+    downloading: bool = False  # the speech model is being fetched (first run)
     finished_at: float | None = None
 
     @property
@@ -180,6 +187,7 @@ class Processor:
                 or self._transcriber.model_name != self.config.whisper_model
             ):
                 self._transcriber = make_transcriber(self.config)
+                self._set(state, downloading=not model_cached(self.config))
             self._transcribe(
                 session,
                 self.config,
