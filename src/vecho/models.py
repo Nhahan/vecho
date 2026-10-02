@@ -103,26 +103,39 @@ def start_ollama(host: str, wait: float = 30.0) -> bool:
     if ollama_running(host):
         return True
     app = ollama_app()
-    with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError, subprocess.SubprocessError):
         if app is not None and sys.platform == "darwin":
             subprocess.run(["open", "-g", "-a", str(app)], check=False, timeout=10)
+            # A freshly installed app may sit on its welcome screen without starting the
+            # server; the server program it carries can be started directly.
+            if not _wait_until_running(host, min(wait, 15.0)):
+                _serve(app / "Contents" / "Resources" / "ollama")
         elif app is not None and sys.platform == "win32":
             subprocess.Popen([str(app)], close_fds=True)
         elif shutil.which("ollama"):
-            subprocess.Popen(
-                ["ollama", "serve"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+            _serve(Path(shutil.which("ollama") or "ollama"))
         else:
             return False
+    return _wait_until_running(host, wait)
+
+
+def _serve(program: Path) -> None:
+    if program.exists():
+        subprocess.Popen(
+            [str(program), "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+
+def _wait_until_running(host: str, wait: float) -> bool:
     deadline = time.monotonic() + wait
     while time.monotonic() < deadline:
         if ollama_running(host):
             return True
         time.sleep(0.5)
-    return False
+    return ollama_running(host)
 
 
 def pull_model(host: str, model: str, on_progress: PullProgress | None = None) -> None:
