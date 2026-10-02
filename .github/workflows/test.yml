@@ -37,6 +37,7 @@ jobs:
       # small models keep the run short; the installer's own choices are tested above
       VECHO_LLM_MODEL: qwen3:4b
       VECHO_WHISPER_MODEL: small
+      VECHO_LLM_TIMEOUT: "900"
     steps:
       - uses: actions/checkout@v4
 
@@ -71,6 +72,11 @@ jobs:
           vecho show --transcript
           vecho show | tee summary.txt
           grep -Eq "김민수|회의|화요일|발표" summary.txt
+
+      - name: Ollama's log (when something failed)
+        if: failure() && runner.os != 'Windows'
+        shell: bash
+        run: tail -n 80 ~/.ollama/logs/server.log 2>/dev/null || journalctl -u ollama --no-pager | tail -n 80 || true
 
       - name: The app starts
         shell: bash

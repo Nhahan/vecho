@@ -20,7 +20,8 @@ def test_second_launch_reuses_the_running_instance(config, monkeypatch):
     while desktop.running_instance(config) is None and time.monotonic() < deadline:
         time.sleep(0.05)
     url = desktop.running_instance(config)
-    assert url and url.startswith("http://127.0.0.1:")
+    files = sorted(p.name for p in config.home.iterdir()) if config.home.is_dir() else []
+    assert url and url.startswith("http://127.0.0.1:"), (out.getvalue(), thread.is_alive(), files)
 
     info_file = config.home / "app.json"
     if sys.platform != "win32":  # Windows has no such permission bits
