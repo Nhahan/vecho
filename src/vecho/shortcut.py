@@ -15,8 +15,12 @@ from .errors import VechoError
 BUNDLE_ID = "io.github.nhahan.vecho"
 
 
+def _resource(*parts: str) -> bytes:
+    return resources.files("vecho").joinpath("resources", *parts).read_bytes()
+
+
 def _icon(name: str) -> bytes:
-    return resources.files("vecho").joinpath("resources", "icon", name).read_bytes()
+    return _resource("icon", name)
 
 
 def vecho_executable() -> Path:
@@ -58,6 +62,7 @@ def _mac_app(executable: Path, bundle: Path) -> Path:
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
   <key>NSMicrophoneUsageDescription</key>
   <string>Recording your side of the conversation needs the microphone.</string>
@@ -68,13 +73,12 @@ def _mac_app(executable: Path, bundle: Path) -> Path:
 """,
         encoding="utf-8",
     )
+    # A real program (not a script) that keeps running and starts vecho as its child: macOS
+    # then asks for permissions in the name of "vecho" (see resources/launcher.swift).
     launcher = contents / "MacOS" / "vecho"
-    log = Path.home() / ".vecho" / "app.log"
-    launcher.write_text(
-        f'#!/bin/sh\nmkdir -p "{log.parent}"\nexec "{executable}" app >> "{log}" 2>&1\n',
-        encoding="utf-8",
-    )
+    launcher.write_bytes(_resource("bin", "launcher"))
     launcher.chmod(0o755)
+    (contents / "Resources" / "command").write_text(f"{executable}\napp\n", encoding="utf-8")
     (contents / "Resources" / "vecho.icns").write_bytes(_icon("vecho.icns"))
     korean = contents / "Resources" / "ko.lproj"
     korean.mkdir(exist_ok=True)
@@ -91,6 +95,13 @@ def _mac_app(executable: Path, bundle: Path) -> Path:
     )
     if Path(lsregister).exists():
         subprocess.run([lsregister, "-f", str(bundle)], check=False, capture_output=True)
+    # Sign the whole app (ad hoc, nothing to buy) so macOS can tie permissions to it.
+    if Path("/usr/bin/codesign").exists():
+        subprocess.run(
+            ["/usr/bin/codesign", "--force", "--sign", "-", str(bundle)],
+            check=False,
+            capture_output=True,
+        )
     bundle.touch()
     return bundle
 

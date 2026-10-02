@@ -295,3 +295,13 @@ def test_the_shipped_helper_is_used_without_a_compiler(tmp_path, monkeypatch):
     monkeypatch.setattr(systemaudio.shutil, "which", lambda name: None)  # no swiftc
     binary = systemaudio.build_helper(tmp_path)
     assert os.access(binary, os.X_OK) and binary.read_bytes()[:4] == b"\xca\xfe\xba\xbe"
+
+
+def test_the_shipped_launcher_matches_its_source():
+    import hashlib
+    from importlib import resources
+
+    folder = resources.files("vecho").joinpath("resources")
+    source = folder.joinpath("launcher.swift").read_text("utf-8")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    assert folder.joinpath("bin", "launcher.digest").read_text("utf-8").strip() == digest

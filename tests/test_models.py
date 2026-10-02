@@ -78,10 +78,10 @@ def test_the_mac_app_asks_for_the_microphone_and_system_audio(tmp_path):
     assert info["CFBundleExecutable"] == "vecho" and info["CFBundleIdentifier"]
     assert info["NSMicrophoneUsageDescription"] and info["NSAudioCaptureUsageDescription"]
     launcher = bundle / "Contents" / "MacOS" / "vecho"
-    assert (
-        launcher.stat().st_mode & 0o111
-        and f'"{tmp_path / "bin" / "vecho"}" app' in launcher.read_text()
-    )
+    assert launcher.stat().st_mode & 0o111 and launcher.read_bytes()[:4] == b"\xca\xfe\xba\xbe"
+    command = (bundle / "Contents" / "Resources" / "command").read_text()
+    assert command == f"{tmp_path / 'bin' / 'vecho'}\napp\n"
+    assert info["LSUIElement"] is True  # the launcher stays out of the Dock; vecho shows there
     assert (bundle / "Contents" / "Resources" / "vecho.icns").stat().st_size > 1000
     strings = (bundle / "Contents" / "Resources" / "ko.lproj" / "InfoPlist.strings").read_text()
     assert "마이크" in strings
