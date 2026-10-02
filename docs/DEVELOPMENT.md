@@ -22,11 +22,11 @@ irm https://raw.githubusercontent.com/Nhahan/vecho/main/install.ps1 | iex       
 
 스크립트가 하는 일: [uv](https://docs.astral.sh/uv/) 설치 → `uv tool install "vecho[desktop] @ <main 브랜치 zip>"`
 → [Ollama](https://ollama.com) 설치(macOS는 `/Applications` 또는 `~/Applications`, 관리자 권한 불필요)
-→ `vecho setup`. 다시 실행하면 업데이트됩니다. 시험용 환경 변수: `VECHO_SOURCE`(다른 위치에서 설치,
+→ `vecho setup`. 다시 실행하면 업데이트됩니다. 지우기: `uninstall.sh` / `uninstall.ps1`(녹음과 Ollama는 남김). 시험용 환경 변수: `VECHO_SOURCE`(다른 위치에서 설치,
 예: 로컬 체크아웃), `VECHO_NO_OPEN=1`(마지막에 앱을 열지 않음).
 
 `vecho setup`은 Ollama를 켜고, 요약 모델과 음성 인식 모델을 진행률과 함께 내려받고, 상대방 소리 녹음
-도우미를 준비하고, 바로가기(macOS: `~/Applications/vecho.app`, Windows: 시작 메뉴·바탕 화면,
+도우미를 준비하고, 바로가기(macOS: `/Applications/vecho.app`, 쓸 수 없으면 `~/Applications/vecho.app`, Windows: 시작 메뉴·바탕 화면,
 Linux: 앱 메뉴)를 만듭니다. 몇 번을 실행해도 안전합니다.
 
 ### 소스에서
