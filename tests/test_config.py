@@ -63,7 +63,7 @@ def test_malformed_toml_is_reported(tmp_path):
 
 @pytest.mark.parametrize(
     ("name", "value"),
-    [("VECHO_LLM_NUM_CTX", "lots"), ("VECHO_LLM_NUM_CTX", "0"), ("VECHO_CHUNK_CHARS", "-5")],
+    [("VECHO_LLM_NUM_CTX", "lots"), ("VECHO_LLM_NUM_CTX", "-1"), ("VECHO_CHUNK_CHARS", "-5")],
 )
 def test_invalid_numbers_are_rejected(tmp_path, name, value):
     with pytest.raises(ConfigError):

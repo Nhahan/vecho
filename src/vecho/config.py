@@ -26,10 +26,10 @@ class Config:
     language: str | None = None
     # Summarization (Ollama).
     llm_host: str = "http://127.0.0.1:11434"
-    llm_model: str = "qwen3.8:27b"
-    llm_num_ctx: int = 32768
+    llm_model: str = "auto"  # auto: the largest model this computer's memory runs well
+    llm_num_ctx: int = 0  # 0: what this computer's memory affords
     llm_timeout: float = 1800.0
-    chunk_chars: int = 16000
+    chunk_chars: int = 0  # 0: half the context (about one character per token in Korean)
     summary_language: str = "Korean"
     # Recording and transcript labels.
     sample_rate: int = 16000
@@ -37,6 +37,20 @@ class Config:
     remote_label: str = "상대방"
 
     def __post_init__(self) -> None:
+        auto = {
+            "llm_model": self.llm_model.strip().lower() in {"", "auto"},
+            "llm_num_ctx": self.llm_num_ctx == 0,
+            "chunk_chars": self.chunk_chars == 0,
+        }
+        if any(auto.values()):
+            from .models import llm_tier
+
+            _, model, context, chunk = llm_tier()
+            for name, value in (("llm_model", model), ("llm_num_ctx", context)):
+                if auto[name]:
+                    object.__setattr__(self, name, value)
+            if auto["chunk_chars"]:
+                object.__setattr__(self, "chunk_chars", min(chunk, self.llm_num_ctx // 2))
         for name in ("llm_num_ctx", "chunk_chars", "sample_rate"):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"'{name}' must be a positive integer")

@@ -177,13 +177,13 @@ class OllamaClient:
         self,
         host: str,
         model: str,
-        num_ctx: int = Config.llm_num_ctx,
+        num_ctx: int | None = None,  # None: the default for this computer (see Config)
         timeout: float = Config.llm_timeout,
     ) -> None:
         host = host.strip().rstrip("/")
         self.host = host if "://" in host else f"http://{host}"  # "localhost:11434" works too
         self.model = model
-        self.num_ctx = num_ctx
+        self.num_ctx = num_ctx if num_ctx else Config().llm_num_ctx
         self.timeout = timeout
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -337,6 +337,33 @@ def summarize_lines(
     return final(joined, from_notes=True)
 
 
+def ensure_model(config: Config, on_progress: ProgressCallback | None = None) -> None:
+    """Start Ollama if needed and download the summary model the first time it is used."""
+    from . import models
+
+    if not models.start_ollama(config.llm_host):
+        if not models.ollama_installed():
+            raise SummarizationError(
+                "the summary AI (Ollama) is not installed; install it from "
+                "https://ollama.com/download (or run the vecho installer again)"
+            )
+        raise SummarizationError("the summary AI (Ollama) did not start; open the Ollama app")
+    client = OllamaClient(config.llm_host, config.llm_model, timeout=10)
+    if client.has_model():
+        return
+
+    def progress(status: str, completed: int, total: int) -> None:
+        if on_progress and total:
+            on_progress("download", completed, total)
+
+    try:
+        models.pull_model(config.llm_host, config.llm_model, progress)
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise SummarizationError(
+            f"could not download the summary model {config.llm_model}: {exc}"
+        ) from exc
+
+
 def summarize_session(
     session: Session,
     config: Config,
@@ -354,6 +381,8 @@ def summarize_session(
             f"session {session.id} has no transcript; run `vecho transcribe {session.id}` first"
         )
     session.refresh()  # a rename (or template choice) made while this job waited
+    if client is None:
+        ensure_model(config, on_progress)
     client = client or OllamaClient(
         config.llm_host, config.llm_model, config.llm_num_ctx, config.llm_timeout
     )

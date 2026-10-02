@@ -30,10 +30,11 @@ from .transcribe import (
 QUEUED = "queued"
 TRANSCRIBING = "transcribing"
 SUMMARIZING = "summarizing"
+DOWNLOADING = "downloading"  # the summary model, the first time it is needed
 DONE = "done"
 ERROR = "error"
 
-ACTIVE = (QUEUED, TRANSCRIBING, SUMMARIZING)
+ACTIVE = (QUEUED, TRANSCRIBING, DOWNLOADING, SUMMARIZING)
 
 STEPS = ("all", "transcribe", "summarize")
 
@@ -201,7 +202,10 @@ class Processor:
             self._set(state, stage=SUMMARIZING, progress=0.0)
 
             def summary_progress(stage: str, step: int, total: int) -> None:
+                if stage == "download":  # step/total are bytes of the model
+                    self._set(state, stage=DOWNLOADING, progress=step / total if total else 0.0)
+                    return
                 done = step - 1 if stage == "notes" else total
-                self._set(state, progress=done / (total + 1))
+                self._set(state, stage=SUMMARIZING, progress=done / (total + 1))
 
             self._summarize(session, self.config, on_progress=summary_progress)
