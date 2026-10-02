@@ -39,13 +39,19 @@ if ($uv) {
 }
 
 Step '2/4  vecho 설치' '2/4  Installing vecho'
+$ErrorActionPreference = 'Continue'  # native programs report progress on stderr
 & $uv tool install --force --python 3.12 "vecho[desktop] @ $Source"
-if ($LASTEXITCODE -ne 0) {
+$installed = $LASTEXITCODE
+$ErrorActionPreference = 'Stop'
+if ($installed -ne 0) {
     Fail 'vecho를 설치하지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요.' `
         'Could not install vecho. Check the internet connection and run this again.'
 }
-& $uv tool update-shell 2>$null | Out-Null  # the 'vecho' command in new windows
-$bin = (& $uv tool dir --bin).Trim()
+# the 'vecho' command in new windows; it reports on stderr, which must not stop the script
+$ErrorActionPreference = 'Continue'
+& $uv tool update-shell *> $null
+$bin = (& $uv tool dir --bin 2>$null | Select-Object -First 1).Trim()
+$ErrorActionPreference = 'Stop'
 $vecho = Join-Path $bin 'vecho.exe'
 
 Step '3/4  요약 AI(Ollama) 설치' '3/4  Installing the summary AI (Ollama)'
@@ -65,4 +71,6 @@ if ((Test-Path $ollamaApp) -or (Get-Command ollama -ErrorAction SilentlyContinue
 }
 
 Step '4/4  AI 모델 내려받기와 마무리' '4/4  Downloading the AI models and finishing up'
+$ErrorActionPreference = 'Continue'
 if ($env:VECHO_NO_OPEN) { & $vecho setup --no-open } else { & $vecho setup }
+if ($LASTEXITCODE -ne 0) { throw 'vecho setup failed' }
