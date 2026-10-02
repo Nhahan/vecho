@@ -21,12 +21,19 @@ const T = KO ? {
   tip2t: "파일로 요약", tip2: "이미 녹음한 파일을 창에 끌어다 놓으면 바로 정리합니다.",
   tip3t: "단축키", tip3: "녹음 시작·중지 · 검색 · 재생",
   chk_microphone: "마이크", chk_system_audio: "상대방 소리", chk_whisper: "음성 인식", chk_llm: "요약 모델",
+  fix_mic_permission: "시스템 설정 → 개인정보 보호 및 보안 → 마이크에서 vecho를 켜 주세요. (Windows: 설정 → 개인 정보 → 마이크)",
+  fix_system_audio: "Mac: 시스템 설정 → 개인정보 보호 및 보안 → 화면 및 시스템 오디오 녹음에서 vecho를 켜 주세요. (macOS 14.4 이상 필요)",
+  fix_reinstall: "설치 명령을 한 번 더 실행해 주세요.",
+  fix_install_ollama: "요약 AI(Ollama)가 없습니다. 설치 명령을 한 번 더 실행하거나 ollama.com에서 Ollama를 설치해 주세요.",
+  fix_start_ollama: "요약 AI(Ollama)가 꺼져 있습니다. Ollama 앱을 실행한 뒤 '다시 확인'을 눌러 주세요.",
+  fix_model_auto: "처음 요약할 때 자동으로 내려받습니다. 시간이 조금 걸려요.",
   fixLabel: "해결 방법",
   summary: "요약", transcript: "대화", copy: "복사", export: "내보내기", more: "더 보기",
   resummarize: "요약 다시 만들기", redo: "처음부터 다시 정리", del: "삭제",
   delTitle: "이 녹음을 삭제할까요?", delBody: "녹음 파일, 대화 내용, 요약이 모두 삭제되며 되돌릴 수 없습니다.",
   cancel: "취소", confirmDel: "삭제",
   queued: "차례를 기다리는 중", transcribing: "음성을 글로 옮기는 중", summarizing: "핵심 내용을 정리하는 중",
+  downloading: "요약 AI 모델을 내려받는 중 (처음 한 번만)",
   firstRun: "처음 한 번은 음성 인식 모델을 내려받느라 몇 분 걸릴 수 있습니다.",
   failed: "정리하지 못했습니다", retry: "다시 시도", kept: "녹음 파일은 그대로 보관되어 있습니다.",
   pending: "아직 정리하지 않은 녹음입니다.", processNow: "지금 정리하기",
@@ -83,12 +90,19 @@ const T = KO ? {
   tip2t: "Summarize a file", tip2: "Drop an existing recording onto the window to summarize it.",
   tip3t: "Shortcuts", tip3: "record/stop · search · play",
   chk_microphone: "Microphone", chk_system_audio: "Other side's audio", chk_whisper: "Speech recognition", chk_llm: "Summary model",
+  fix_mic_permission: "Turn vecho on in System Settings → Privacy & Security → Microphone. (Windows: Settings → Privacy → Microphone)",
+  fix_system_audio: "Mac: turn vecho on in System Settings → Privacy & Security → Screen & System Audio Recording. (Needs macOS 14.4 or newer.)",
+  fix_reinstall: "Run the install command once more.",
+  fix_install_ollama: "The summary AI (Ollama) is missing. Run the install command again, or install Ollama from ollama.com.",
+  fix_start_ollama: "The summary AI (Ollama) is not running. Open the Ollama app, then press 'Check again'.",
+  fix_model_auto: "It downloads by itself the first time you summarize. That takes a little while.",
   fixLabel: "Fix",
   summary: "Summary", transcript: "Transcript", copy: "Copy", export: "Export", more: "More",
   resummarize: "Summarize again", redo: "Reprocess from scratch", del: "Delete",
   delTitle: "Delete this recording?", delBody: "The audio, transcript and summary will be removed. This cannot be undone.",
   cancel: "Cancel", confirmDel: "Delete",
   queued: "Waiting in line", transcribing: "Transcribing", summarizing: "Writing the summary",
+  downloading: "Downloading the summary AI model (first time only)",
   firstRun: "The first run downloads the speech model and can take a few minutes.",
   failed: "Could not process this recording", retry: "Try again", kept: "The recording itself is safe.",
   pending: "This recording has not been processed yet.", processNow: "Process now",
@@ -638,7 +652,7 @@ function renderHome() {
         <span class="glyph">${icon(c.status === "ok" ? "check" : "alert")}</span>
         <span class="name">${esc(T["chk_" + c.key] || c.key)}</span>
         <span class="detail">${esc(localDetail(c.detail))}</span>
-        ${c.fix ? `<span class="fix">${esc(T.fixLabel)} · <code>${esc(c.fix)}</code></span>` : ""}
+        ${c.fix ? `<span class="fix">${c.status === "ok" ? "" : esc(T.fixLabel) + " · "}${esc(T["fix_" + c.fix] || c.hint || c.fix)}</span>` : ""}
       </li>`).join("");
   $("view").className = "doc home";
   $("view").innerHTML = `
@@ -661,7 +675,7 @@ function renderHome() {
 function progressHtml(job) {
   const pct = Math.round((job.progress || 0) * 100);
   const loose = job.stage === "queued" || (job.stage === "summarizing" && pct === 0);
-  const showPct = job.stage === "transcribing";
+  const showPct = job.stage === "transcribing" || job.stage === "downloading";
   const skeleton = `<div class="skeleton"><i class="head w40"></i><i class="gap"></i><i></i><i class="w90"></i><i class="w60"></i><i class="gap"></i><i class="w25"></i><i class="w75"></i><i class="w60"></i></div>`;
   return `<div class="progress-row">
       <div class="progress-label"><span class="spin"></span>${esc(T[job.stage])}${showPct ? `<span class="pct">${pct}%</span>` : ""}</div>
@@ -686,7 +700,7 @@ function noticeHtml(kind, title, text, action) {
 function renderSession(opts) {
   const d = detail;
   const job = d.job;
-  const working = job && ["queued", "transcribing", "summarizing"].includes(job.stage);
+  const working = job && ["queued", "transcribing", "downloading", "summarizing"].includes(job.stage);
   const recording = d.status === "recording";
   const locked = working || recording;
 
@@ -921,7 +935,7 @@ async function act(name) {
     if (name === "resummarize") { detail = await api(`sessions/${id}/process`, { method: "POST", body: { step: "summarize" } }); render({ keepScroll: true }); refreshList(); }
     if (name === "retry") {
       // a failed summary is retried without transcribing the whole recording again
-      const step = d.job && d.job.stage === "error" && d.job.failed_in === "summarizing" ? "summarize" : "all";
+      const step = d.job && d.job.stage === "error" && ["summarizing", "downloading"].includes(d.job.failed_in) ? "summarize" : "all";
       detail = await api(`sessions/${id}/process`, { method: "POST", body: { step } }); render({ keepScroll: true }); refreshList();
     }
     else if (name === "delete") {

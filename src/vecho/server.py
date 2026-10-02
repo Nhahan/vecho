@@ -461,11 +461,21 @@ class App:
     # -- health -----------------------------------------------------------------------------
 
     def doctor(self) -> list[dict[str, str]]:
+        """Readiness checks. ``fix`` is a code the app explains in plain words (``hint`` is the
+        technical detail for the command line)."""
+        from . import models
+
         checks: list[dict[str, str]] = []
 
-        def add(key: str, ok: bool, detail: str, fix: str = "") -> None:
+        def add(key: str, ok: bool, detail: str, fix: str = "", hint: str = "") -> None:
             checks.append(
-                {"key": key, "status": "ok" if ok else "fail", "detail": detail, "fix": fix}
+                {
+                    "key": key,
+                    "status": "ok" if ok else "fail",
+                    "detail": detail,
+                    "fix": fix,
+                    "hint": hint,
+                }
             )
 
         try:
@@ -475,37 +485,40 @@ class App:
                 "microphone",
                 mic is not None,
                 mic.name if mic else "no microphone found",
-                "" if mic else "Connect a microphone and allow microphone access for this app.",
+                "" if mic else "mic_permission",
             )
         except VechoError as exc:
-            devices = []
-            add("microphone", False, str(exc), "Allow microphone access for this app.")
+            add("microphone", False, str(exc), "mic_permission")
 
         try:
             source = systemaudio.prepare(self.config.home / "bin")
             add("system_audio", True, source.name)
         except VechoError as exc:
-            add("system_audio", False, str(exc), systemaudio.install_hint())
+            add("system_audio", False, str(exc), "system_audio", systemaudio.install_hint())
 
         whisper = importlib.util.find_spec("faster_whisper") is not None
         add(
             "whisper",
             whisper,
             engine_label(self.config) if whisper else "not installed",
-            "" if whisper else "pip install faster-whisper",
+            "" if whisper else "reinstall",
         )
 
-        client = OllamaClient(self.config.llm_host, self.config.llm_model, timeout=5)
+        host, model = self.config.llm_host, self.config.llm_model
+        if not models.ollama_running(host) and models.ollama_installed():
+            models.start_ollama(host, wait=15)  # installed but not started yet
+        client = OllamaClient(host, model, timeout=5)
         try:
             has_model = client.has_model()
+            # a missing model is fine: the first summary downloads it
+            add("llm", True, model, "" if has_model else "model_auto")
+        except VechoError as exc:
             add(
                 "llm",
-                has_model,
-                self.config.llm_model,
-                "" if has_model else f"ollama pull {self.config.llm_model}",
+                False,
+                str(exc),
+                "start_ollama" if models.ollama_installed() else "install_ollama",
             )
-        except VechoError as exc:
-            add("llm", False, str(exc), "Install Ollama from https://ollama.com and start it.")
         return checks
 
 

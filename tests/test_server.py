@@ -415,15 +415,31 @@ def test_import_rejects_other_files(served):
 
 
 def test_doctor_reports_each_part(served, monkeypatch):
-    from vecho import server
+    from vecho import models, server
 
+    monkeypatch.setattr(models, "ollama_running", lambda host: True)
     monkeypatch.setattr(server.OllamaClient, "has_model", lambda self: False)
     _, client = served
     _, checks, _ = client.call("GET", "/api/doctor")
     by_key = {c["key"]: c for c in checks}
     assert by_key["microphone"]["status"] == "ok"
     assert by_key["system_audio"]["status"] == "ok"
-    assert by_key["llm"]["status"] == "fail" and "ollama pull" in by_key["llm"]["fix"]
+    # a missing model is not a problem: the first summary downloads it
+    assert (by_key["llm"]["status"], by_key["llm"]["fix"]) == ("ok", "model_auto")
+
+
+def test_doctor_explains_a_missing_summary_ai(served, monkeypatch):
+    from vecho import models, server
+
+    def unreachable(self):
+        raise SummarizationError("cannot reach Ollama")
+
+    monkeypatch.setattr(models, "ollama_running", lambda host: False)
+    monkeypatch.setattr(models, "ollama_installed", lambda: False)
+    monkeypatch.setattr(server.OllamaClient, "has_model", unreachable)
+    _, checks, _ = served[1].call("GET", "/api/doctor")
+    llm = {c["key"]: c for c in checks}["llm"]
+    assert (llm["status"], llm["fix"]) == ("fail", "install_ollama")
 
 
 # ---- helpers ---------------------------------------------------------------------------
