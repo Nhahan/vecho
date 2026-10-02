@@ -232,6 +232,8 @@ class CaptureProcess:
                 return
             if len(header) < HEADER.size or len(payload) < count * 2:
                 if not self._stopping:  # the child died or the device went away
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        self._process.wait(2)  # its exit code says why
                     code = self._process.poll()
                     detail = f" (exit code {code})" if code else ""
                     self.error = f"the microphone stopped{detail}{self._why()}"
