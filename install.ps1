@@ -65,7 +65,9 @@ if ((Test-Path $ollamaApp) -or (Get-Command ollama -ErrorAction SilentlyContinue
     } catch {
         Fail 'Ollama를 내려받지 못했습니다. 다시 실행해 주세요.' 'Could not download Ollama. Please run this again.'
     }
-    Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
+    # wait for the installer only: -Wait would also wait for the Ollama app it starts, forever
+    $installer = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -PassThru
+    $installer.WaitForExit()
     Remove-Item $setup -ErrorAction SilentlyContinue
     Say '설치했습니다.' 'Installed.'
 }
