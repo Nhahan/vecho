@@ -15,6 +15,7 @@ import os
 import re
 import secrets
 import shutil
+import socketserver
 import sys
 import tempfile
 import threading
@@ -943,6 +944,12 @@ class VechoHTTPServer(ThreadingHTTPServer):
     def __init__(self, app: App, port: int = 0) -> None:
         self.app = app
         super().__init__(("127.0.0.1", port), Handler)
+
+    def server_bind(self) -> None:
+        # HTTPServer looks up a host name for the address (socket.getfqdn), which can take
+        # tens of seconds on some networks; the app only ever listens on 127.0.0.1.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
 
     @property
     def url(self) -> str:
