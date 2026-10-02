@@ -507,7 +507,17 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8_output() -> None:
+    """Korean text must print even where the console or a pipe uses another encoding."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if stream is not None and encoding != "utf8" and hasattr(stream, "reconfigure"):
+            with contextlib.suppress(Exception):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _utf8_output()
     args = build_parser().parse_args(argv)
     try:
         return int(args.func(args, load_config()))
