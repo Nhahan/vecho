@@ -316,10 +316,10 @@ def _audio_blocks(source: Any, seconds: float = VAD_BLOCK_SEC) -> Iterator[Any]:
                     return
                 yield np.frombuffer(frames, dtype="<i2").astype(np.float32) / 32768.0
     except (wave.Error, EOFError):
-        pass  # not a plain WAV (an imported recording): decode it as a whole
-    from faster_whisper import decode_audio
+        pass  # not a plain WAV (an imported recording): decode it as it goes
+    from .decoding import float_blocks
 
-    yield from _audio_blocks(decode_audio(str(path), sampling_rate=SAMPLE_RATE), seconds)
+    yield from float_blocks(path, size)
 
 
 def _detect_speech(audio: Any) -> list[dict[str, int]]:
@@ -404,17 +404,9 @@ def _duration(path: Path) -> float:
             return wav.getnframes() / wav.getframerate()
     except (wave.Error, EOFError, OSError):
         pass
-    try:  # an imported recording: its container knows (decoding it just for this is costly)
-        import av
+    from .decoding import duration
 
-        with av.open(str(path)) as container:
-            if container.duration:
-                return container.duration / 1_000_000
-    except Exception:
-        pass
-    from faster_whisper.audio import decode_audio
-
-    return len(decode_audio(str(path), sampling_rate=SAMPLE_RATE)) / SAMPLE_RATE
+    return duration(path)  # an imported recording (mp3, m4a, …)
 
 
 class MlxTranscriber:

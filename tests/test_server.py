@@ -352,7 +352,7 @@ def test_audio_mixes_both_tracks_and_supports_ranges(served):
     session = make_session(app, tracks=("me", "remote"))
     path = f"/api/sessions/{session.id}/audio?t={app.token}"
     status, body, headers = client.call("GET", path, token=False)
-    assert status == 200 and headers["Content-Type"] == "audio/x-wav"
+    assert status == 200 and headers["Content-Type"] == "audio/wav"
     assert headers["Accept-Ranges"] == "bytes"
     with wave.open(str(session.path_for("mix.wav"))) as wav:
         mixed = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")

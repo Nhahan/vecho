@@ -522,6 +522,8 @@ class App:
         return checks
 
 
+PLAYBACK_TYPES = {".wav": "audio/wav"}
+
 _MIX_BLOCK = 1 << 20  # frames per step: bounded memory however long the recording is
 
 
@@ -550,19 +552,15 @@ def _as_plain_wav(path: Path, directory: Path) -> Path:
     fd, name = tempfile.mkstemp(dir=directory, prefix=".decoded.", suffix=".wav")
     os.close(fd)
     try:
-        import av
+        from .decoding import pcm_blocks
 
         # frame by frame: a two-hour import never sits decoded in memory as a whole
-        with av.open(str(path)) as container, wave.open(name, "wb") as out:
+        with wave.open(name, "wb") as out:
             out.setnchannels(1)
             out.setsampwidth(2)
             out.setframerate(16000)
-            resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
-            for frame in container.decode(audio=0):
-                for converted in resampler.resample(frame):
-                    out.writeframes(converted.to_ndarray().tobytes())
-            for converted in resampler.resample(None):
-                out.writeframes(converted.to_ndarray().tobytes())
+            for block in pcm_blocks(path):
+                out.writeframes(block.astype("<i2").tobytes())
     except Exception as exc:
         with contextlib.suppress(OSError):
             os.unlink(name)
@@ -892,7 +890,10 @@ class Handler(BaseHTTPRequestHandler):
     def _file(self, path: Path) -> None:
         """Serve a file with Range support so the audio player can seek."""
         size = path.stat().st_size
-        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        # the same on every system (Windows' registry says audio/wav, others audio/x-wav)
+        content_type = PLAYBACK_TYPES.get(path.suffix.lower()) or (
+            mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        )
         start, end = 0, size - 1
         status = HTTPStatus.OK
         match = re.fullmatch(r"bytes=(\d*)-(\d*)", self.headers.get("Range", "").strip())
