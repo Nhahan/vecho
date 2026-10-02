@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,7 +19,7 @@ class FakeModel:
 
     def transcribe(self, path, **kwargs):
         self.calls.append((path, kwargs))
-        name = path.rsplit("/", 1)[-1]
+        name = Path(path).name
         segments = (SimpleNamespace(start=s, end=e, text=t) for s, e, t in self.scripts[name])
         return segments, SimpleNamespace(language=self.language, duration=self.duration)
 

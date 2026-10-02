@@ -184,6 +184,7 @@ def test_build_helper_removes_binaries_of_older_sources(monkeypatch, tmp_path):
     assert [p.name for p in bin_dir.iterdir()] == [current.name]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="the fake compiler is a shell script")
 def test_build_helper_reports_compile_errors(monkeypatch, tmp_path):
     monkeypatch.setattr(systemaudio, "_prebuilt", lambda digest: None)  # a changed source
     swiftc = make_fake_swiftc(tmp_path, ok=False)

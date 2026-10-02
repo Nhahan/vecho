@@ -2,6 +2,7 @@
 
 import json
 import plistlib
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -72,6 +73,7 @@ def test_a_model_download_reports_progress():
     assert seen[-1] == ("success", 110, 120)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="a macOS app bundle")
 def test_the_mac_app_asks_for_the_microphone_and_system_audio(tmp_path):
     bundle = shortcut._mac_app(tmp_path / "bin" / "vecho", tmp_path / "vecho.app")
     info = plistlib.loads((bundle / "Contents" / "Info.plist").read_bytes())
@@ -83,7 +85,9 @@ def test_the_mac_app_asks_for_the_microphone_and_system_audio(tmp_path):
     assert command == f"{tmp_path / 'bin' / 'vecho'}\napp\n"
     assert info["LSUIElement"] is True  # the launcher stays out of the Dock; vecho shows there
     assert (bundle / "Contents" / "Resources" / "vecho.icns").stat().st_size > 1000
-    strings = (bundle / "Contents" / "Resources" / "ko.lproj" / "InfoPlist.strings").read_text()
+    strings = (bundle / "Contents" / "Resources" / "ko.lproj" / "InfoPlist.strings").read_text(
+        "utf-8"
+    )
     assert "마이크" in strings
 
 

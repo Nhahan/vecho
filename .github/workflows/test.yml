@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+      - name: Sound library (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
       - run: uv run --python 3.12 pytest
       - run: uv run --python 3.12 ruff check .
         if: runner.os == 'Linux'
@@ -44,7 +47,8 @@ jobs:
       - name: Install (Windows)
         if: runner.os == 'Windows'
         shell: powershell
-        run: Get-Content -Raw install.ps1 | Invoke-Expression
+        # exactly what a user pastes (the script of this commit)
+        run: irm https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/install.ps1 | iex
 
       - name: Put the installed commands on PATH
         shell: bash

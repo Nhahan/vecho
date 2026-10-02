@@ -16,14 +16,15 @@ def test_second_launch_reuses_the_running_instance(config, monkeypatch):
     stop = threading.Event()
     thread = threading.Thread(target=desktop.run, args=(config, 0, "none", out, stop), daemon=True)
     thread.start()
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30  # a cold, slow machine takes a while
     while desktop.running_instance(config) is None and time.monotonic() < deadline:
-        time.sleep(0.02)
+        time.sleep(0.05)
     url = desktop.running_instance(config)
     assert url and url.startswith("http://127.0.0.1:")
 
     info_file = config.home / "app.json"
-    assert oct(info_file.stat().st_mode & 0o777) == "0o600"  # it holds the API token
+    if sys.platform != "win32":  # Windows has no such permission bits
+        assert oct(info_file.stat().st_mode & 0o777) == "0o600"  # it holds the API token
 
     second = io.StringIO()
     assert desktop.run(config, 0, "browser", second) == 0
