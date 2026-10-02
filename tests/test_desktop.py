@@ -1,7 +1,10 @@
 import io
 import json
+import sys
 import threading
 import time
+
+import pytest
 
 from vecho import desktop
 
@@ -66,6 +69,7 @@ def test_simultaneous_launches_start_only_one_app(config, monkeypatch):
     lock.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
 def test_a_stop_signal_closes_the_window_and_helpers_can_still_be_stopped():
     import os
     import signal

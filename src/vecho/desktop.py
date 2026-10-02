@@ -98,6 +98,8 @@ def _show_window(url: str) -> None:
 
     with contextlib.suppress(Exception):
         webview.settings["ALLOW_DOWNLOADS"] = True
+    if sys.platform == "darwin":
+        _present_as_vecho()
     window = webview.create_window("vecho", url, width=1180, height=800, min_size=(720, 520))
     main = threading.current_thread() is threading.main_thread()
     restore = _close_on_signal(window) if os.name == "posix" and main else None
@@ -135,6 +137,23 @@ def _close_on_signal(window: Any) -> Any:
         os.close(write_end)  # ends the watcher
 
     return restore
+
+
+def _present_as_vecho() -> None:
+    """Show "vecho" and its icon in the menu bar and Dock instead of "Python"."""
+    with contextlib.suppress(Exception):
+        from importlib import resources
+
+        from AppKit import NSApplication, NSImage
+        from Foundation import NSBundle
+
+        info = NSBundle.mainBundle().infoDictionary()  # read when the app starts: set it first
+        info["CFBundleName"] = "vecho"
+        info["CFBundleDisplayName"] = "vecho"
+        icon = resources.files("vecho").joinpath("resources", "icon", "vecho.icns")
+        image = NSImage.alloc().initWithContentsOfFile_(str(icon))
+        if image is not None:
+            NSApplication.sharedApplication().setApplicationIconImage_(image)
 
 
 def _wait_for_signal(stop: threading.Event) -> None:
