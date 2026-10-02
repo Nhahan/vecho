@@ -36,10 +36,25 @@ def install(executable: Path | None = None, home: Path | None = None) -> Path:
     executable = executable or vecho_executable()
     home = home or Path.home()
     if sys.platform == "darwin":
-        return _mac_app(executable, home / "Applications" / "vecho.app")
+        return _mac_app(executable, mac_app_location(home))
     if sys.platform == "win32":
         return _windows_shortcuts(executable)
     return _linux_entry(executable, home)
+
+
+def mac_app_location(home: Path | None = None) -> Path:
+    """/Applications (what Finder lists as Applications) when this account may write there,
+    which most can; otherwise the Applications folder in the home folder."""
+    home = home or Path.home()
+    shared = Path("/Applications")
+    if home == Path.home() and os.access(shared, os.W_OK):
+        return shared / "vecho.app"
+    return home / "Applications" / "vecho.app"
+
+
+def mac_app_locations(home: Path | None = None) -> list[Path]:
+    home = home or Path.home()
+    return [Path("/Applications") / "vecho.app", home / "Applications" / "vecho.app"]
 
 
 def _mac_app(executable: Path, bundle: Path) -> Path:
@@ -103,6 +118,11 @@ def _mac_app(executable: Path, bundle: Path) -> Path:
             capture_output=True,
         )
     bundle.touch()
+    places = mac_app_locations()
+    if bundle in places:  # an older copy in the other place would show up twice
+        for other in places:
+            if other != bundle and (other / "Contents" / "Resources" / "command").exists():
+                shutil.rmtree(other, ignore_errors=True)
     return bundle
 
 
@@ -114,7 +134,7 @@ def _windows_shortcuts(executable: Path) -> Path:
     icon.write_bytes(_icon("vecho.ico"))
     appdata = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     start_menu = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "vecho.lnk"
-    desktop = Path.home() / "Desktop" / "vecho.lnk"
+    desktop = _windows_desktop() / "vecho.lnk"
     for link in (start_menu, desktop):
         if not link.parent.is_dir():
             continue
@@ -139,6 +159,20 @@ def _windows_shortcuts(executable: Path) -> Path:
         if result.returncode != 0:
             raise VechoError(f"cannot create the shortcut: {result.stderr.strip()[-300:]}")
     return start_menu
+
+
+def _windows_desktop() -> Path:
+    """The real desktop folder (often moved into OneDrive), not just ~/Desktop."""
+    try:
+        import ctypes
+
+        buffer = ctypes.create_unicode_buffer(260)
+        # CSIDL_DESKTOPDIRECTORY
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0x10, None, 0, buffer) == 0:  # type: ignore[attr-defined]
+            return Path(buffer.value)
+    except (AttributeError, OSError):
+        pass
+    return Path.home() / "Desktop"
 
 
 def _linux_entry(executable: Path, home: Path) -> Path:

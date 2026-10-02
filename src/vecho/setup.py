@@ -35,7 +35,8 @@ TEXT = {
         "system_audio_no": "상대방 소리 녹음은 이 컴퓨터에서 쓸 수 없습니다: {why}",
         "shortcut": "바로가기 만드는 중",
         "done": "준비가 끝났습니다!",
-        "open_mac": "응용 프로그램(또는 Launchpad)에서 'vecho'를 찾아 실행하세요.",
+        "open_mac": "이제 'vecho'를 실행하세요: ⌘(command)+스페이스바를 누르고 vecho를 입력한 뒤 "
+        "return 키를 누르거나, Finder의 응용 프로그램 폴더에서 vecho를 여세요.",
         "open_windows": "바탕 화면이나 시작 메뉴의 'vecho'를 눌러 실행하세요.",
         "open_other": "앱 메뉴의 'vecho'를 눌러 실행하세요.",
         "permission": "처음 녹음할 때 마이크와 '시스템 오디오 녹음' 허용 창이 뜨면 "
@@ -57,7 +58,8 @@ TEXT = {
         "system_audio_no": "Recording the other side is not available on this computer: {why}",
         "shortcut": "Creating a shortcut",
         "done": "All set!",
-        "open_mac": "Find 'vecho' in Applications (or Launchpad) to start it.",
+        "open_mac": "Start vecho: press ⌘+Space, type vecho and press Return, or open it from "
+        "the Applications folder in Finder.",
         "open_windows": "Click 'vecho' on the desktop or in the Start menu.",
         "open_other": "Start 'vecho' from your applications menu.",
         "permission": "The first time you record, click 'Allow' when asked about the microphone "

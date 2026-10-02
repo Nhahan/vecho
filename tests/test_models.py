@@ -105,3 +105,14 @@ def test_the_context_fits_the_computer_unless_set(monkeypatch):
     chosen = Config(llm_model="qwen3.8:27b", llm_num_ctx=32768)
     assert (chosen.llm_num_ctx, chosen.chunk_chars) == (32768, 4000)
     assert Config(llm_num_ctx=6000).chunk_chars == 3000  # never more than half the context
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a macOS app bundle")
+def test_an_old_copy_is_replaced_but_nothing_else_is_touched(tmp_path, monkeypatch):
+    shared, personal = tmp_path / "Applications" / "vecho.app", tmp_path / "home" / "vecho.app"
+    monkeypatch.setattr(shortcut, "mac_app_locations", lambda home=None: [shared, personal])
+    shortcut._mac_app(tmp_path / "vecho", personal)  # an older install in the home folder
+    shortcut._mac_app(tmp_path / "vecho", tmp_path / "elsewhere" / "vecho.app")
+    assert personal.exists()  # an app made anywhere else (like this test) leaves it alone
+    shortcut._mac_app(tmp_path / "vecho", shared)
+    assert shared.exists() and not personal.exists()  # one vecho in Applications, not two
