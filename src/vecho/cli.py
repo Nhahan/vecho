@@ -296,7 +296,7 @@ def _doctor_remote(report: Callable[[str, str], None], config: Config) -> None:
     report("OK", "system audio capture: built in (no driver or setup needed)")
     report(
         "INFO",
-        "if the other party's track is silent, allow your terminal in System Settings > "
+        "if the other party's track is silent, allow vecho (or your terminal) in System Settings > "
         "Privacy & Security > Screen & System Audio Recording",
     )
 
@@ -319,7 +319,7 @@ def cmd_doctor(args: argparse.Namespace, config: Config) -> int:
         if mic:
             report("OK", f"microphone: {mic.name}")
         else:
-            report("FAIL", "no default microphone (check macOS microphone permission)")
+            report("FAIL", "no default microphone (connect one and allow vecho to use it)")
         _doctor_remote(report, config)
 
     if importlib.util.find_spec("faster_whisper"):
