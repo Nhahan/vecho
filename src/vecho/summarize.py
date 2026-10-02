@@ -179,12 +179,14 @@ class OllamaClient:
         model: str,
         num_ctx: int | None = None,  # None: the default for this computer (see Config)
         timeout: float = Config.llm_timeout,
+        num_gpu: int = -1,  # -1: Ollama decides
     ) -> None:
         host = host.strip().rstrip("/")
         self.host = host if "://" in host else f"http://{host}"  # "localhost:11434" works too
         self.model = model
         self.num_ctx = num_ctx if num_ctx else Config().llm_num_ctx
         self.timeout = timeout
+        self.num_gpu = num_gpu
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None if payload is None else json.dumps(payload).encode("utf-8")
@@ -237,7 +239,11 @@ class OllamaClient:
                 ],
                 "stream": False,
                 "think": False,
-                "options": {"num_ctx": self.num_ctx, "temperature": 0.2},
+                "options": {
+                    "num_ctx": self.num_ctx,
+                    "temperature": 0.2,
+                    **({"num_gpu": self.num_gpu} if self.num_gpu >= 0 else {}),
+                },
             },
         )
         try:
@@ -384,7 +390,11 @@ def summarize_session(
     if client is None:
         ensure_model(config, on_progress)
     client = client or OllamaClient(
-        config.llm_host, config.llm_model, config.llm_num_ctx, config.llm_timeout
+        config.llm_host,
+        config.llm_model,
+        config.llm_num_ctx,
+        config.llm_timeout,
+        num_gpu=config.llm_num_gpu,
     )
     segments = transcript.load_segments(session.path_for(TRANSCRIPT_JSON))
     lines = transcript.render_lines(segments, config.label_for)

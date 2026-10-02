@@ -170,6 +170,7 @@ remote_label = "상대방"
 | `llm_model` | `VECHO_LLM_MODEL` | `auto` (위 [요약 모델](#요약-모델) 표) |
 | `llm_num_ctx` | `VECHO_LLM_NUM_CTX` | `0` = 메모리에 맞춰 |
 | `llm_timeout` | `VECHO_LLM_TIMEOUT` | `1800` (초) |
+| `llm_num_gpu` | `VECHO_LLM_NUM_GPU` | `-1` = Ollama가 결정 (`0`이면 GPU를 쓰지 않음) |
 | `chunk_chars` | `VECHO_CHUNK_CHARS` | `0` = 메모리에 맞춰 (컨텍스트의 절반 이하) |
 | `summary_language` | `VECHO_SUMMARY_LANGUAGE` | `Korean` |
 | `sample_rate` | `VECHO_SAMPLE_RATE` | `16000` |

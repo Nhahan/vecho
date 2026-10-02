@@ -368,3 +368,10 @@ def test_condensing_stops_when_the_notes_do_not_get_shorter(ollama):
     summarize_lines(["x" * 150] * 6, client_for(ollama), "Korean", 200)
     # 6 notes, then one condensing round that did not help, then the summary
     assert len(ollama.requests) <= 6 + 6 + 1
+
+
+def test_the_summary_ai_can_be_kept_off_the_gpu(ollama):
+    client_for(ollama, num_gpu=0).chat("system", "user")
+    client_for(ollama).chat("system", "user")
+    first, second = (r["options"] for r in ollama.requests)
+    assert first["num_gpu"] == 0 and "num_gpu" not in second  # by default Ollama decides

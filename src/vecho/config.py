@@ -29,6 +29,7 @@ class Config:
     llm_model: str = "auto"  # auto: the largest model this computer's memory runs well
     llm_num_ctx: int = 0  # 0: what this computer's memory affords
     llm_timeout: float = 1800.0
+    llm_num_gpu: int = -1  # layers Ollama puts on the GPU; -1: Ollama decides, 0: CPU only
     chunk_chars: int = 0  # 0: half the context (about one character per token in Korean)
     summary_language: str = "Korean"
     # Recording and transcript labels.
@@ -92,6 +93,7 @@ _CASTERS: dict[str, Callable[[object], object]] = {
     "chunk_chars": lambda raw: int(str(raw)),
     "sample_rate": lambda raw: int(str(raw)),
     "llm_timeout": lambda raw: float(str(raw)),
+    "llm_num_gpu": lambda raw: int(str(raw)),
 }
 
 
