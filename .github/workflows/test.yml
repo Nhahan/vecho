@@ -45,6 +45,10 @@ jobs:
         if: runner.os != 'Windows'
         run: sh install.sh
 
+      - name: Run the summary AI on the CPU (CI Macs are VMs without a usable GPU for it)
+        if: runner.os == 'macOS'
+        run: echo "VECHO_LLM_NUM_GPU=0" >> "$GITHUB_ENV"
+
       - name: Install (Windows)
         if: runner.os == 'Windows'
         shell: powershell
