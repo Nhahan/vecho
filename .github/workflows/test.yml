@@ -63,7 +63,7 @@ jobs:
         shell: bash
         run: |
           case "$RUNNER_OS" in
-            macOS) test -x "$HOME/Applications/vecho.app/Contents/MacOS/vecho" ;;
+            macOS) test -x /Applications/vecho.app/Contents/MacOS/vecho || test -x "$HOME/Applications/vecho.app/Contents/MacOS/vecho" ;;
             Windows) test -f "$APPDATA/Microsoft/Windows/Start Menu/Programs/vecho.lnk" ;;
             Linux) test -f "$HOME/.local/share/applications/vecho.desktop" ;;
           esac
@@ -89,3 +89,18 @@ jobs:
           for i in $(seq 1 30); do grep -q "running at" app.log && break; sleep 1; done
           cat app.log
           grep -q "running at" app.log
+
+      - name: Uninstall
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            powershell -NoProfile -Command "irm https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/uninstall.ps1 | iex"
+          else
+            sh uninstall.sh
+          fi
+          if command -v vecho; then echo "vecho is still installed"; exit 1; fi
+          case "$RUNNER_OS" in
+            macOS) test ! -e /Applications/vecho.app && test ! -e "$HOME/Applications/vecho.app" ;;
+            Windows) test ! -f "$APPDATA/Microsoft/Windows/Start Menu/Programs/vecho.lnk" ;;
+            Linux) test ! -f "$HOME/.local/share/applications/vecho.desktop" ;;
+          esac
