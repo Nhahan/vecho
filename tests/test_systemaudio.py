@@ -185,6 +185,7 @@ def test_build_helper_removes_binaries_of_older_sources(monkeypatch, tmp_path):
 
 
 def test_build_helper_reports_compile_errors(monkeypatch, tmp_path):
+    monkeypatch.setattr(systemaudio, "_prebuilt", lambda digest: None)  # a changed source
     swiftc = make_fake_swiftc(tmp_path, ok=False)
     monkeypatch.setattr(systemaudio.shutil, "which", lambda name: str(swiftc))
     with pytest.raises(AudioError, match="boom"):
@@ -193,6 +194,7 @@ def test_build_helper_reports_compile_errors(monkeypatch, tmp_path):
 
 
 def test_build_helper_needs_swiftc(monkeypatch, tmp_path):
+    monkeypatch.setattr(systemaudio, "_prebuilt", lambda digest: None)
     monkeypatch.setattr(systemaudio.shutil, "which", lambda name: None)
     with pytest.raises(AudioError, match="xcode-select"):
         systemaudio.build_helper(tmp_path)
@@ -272,3 +274,24 @@ def test_two_threads_building_at_once_both_get_the_helper(monkeypatch, tmp_path)
     import os
 
     assert os.access(results[0], os.X_OK)
+
+
+def test_the_shipped_helper_matches_its_source():
+    """Run scripts/build-helper.sh after changing system_audio.swift."""
+    import hashlib
+    from importlib import resources
+
+    folder = resources.files("vecho").joinpath("resources")
+    source = folder.joinpath("system_audio.swift").read_text("utf-8")
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:12]
+    assert folder.joinpath("bin", "system-audio.digest").read_text("utf-8").strip() == digest
+
+
+def test_the_shipped_helper_is_used_without_a_compiler(tmp_path, monkeypatch):
+    import os
+
+    from vecho import systemaudio
+
+    monkeypatch.setattr(systemaudio.shutil, "which", lambda name: None)  # no swiftc
+    binary = systemaudio.build_helper(tmp_path)
+    assert os.access(binary, os.X_OK) and binary.read_bytes()[:4] == b"\xca\xfe\xba\xbe"

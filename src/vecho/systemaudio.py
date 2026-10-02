@@ -114,7 +114,30 @@ def build_helper(bin_dir: Path) -> Path:
         return _build(source, binary, bin_dir)
 
 
+def _prebuilt(digest: str) -> Path | None:
+    """The helper shipped with vecho, if it was built from this exact source."""
+    shipped = resources.files("vecho").joinpath("resources", "bin")
+    try:
+        if shipped.joinpath("system-audio.digest").read_text("utf-8").strip() != digest:
+            return None
+        path = Path(str(shipped.joinpath("system-audio")))
+    except (OSError, ValueError):
+        return None
+    return path if path.is_file() else None
+
+
 def _build(source: str, binary: Path, bin_dir: Path) -> Path:
+    digest = binary.name.rsplit("-", 1)[-1]
+    prebuilt = _prebuilt(digest)
+    if prebuilt is not None:  # no compiler (Xcode tools) needed
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        fd, partial_name = tempfile.mkstemp(dir=bin_dir, prefix=f".{binary.name}.", suffix=".tmp")
+        os.close(fd)
+        shutil.copyfile(prebuilt, partial_name)
+        Path(partial_name).chmod(0o755)
+        os.replace(partial_name, binary)
+        _remove_stale(bin_dir, binary)
+        return binary
     swiftc = shutil.which("swiftc")
     if swiftc is None:
         raise AudioError(
@@ -143,10 +166,14 @@ def _build(source: str, binary: Path, bin_dir: Path) -> Path:
             raise AudioError(f"cannot build the system audio helper: {proc.stderr.strip()[-400:]}")
         partial.chmod(0o755)
         os.replace(partial, binary)
+    _remove_stale(bin_dir, binary)
+    return binary
+
+
+def _remove_stale(bin_dir: Path, binary: Path) -> None:
     for stale in bin_dir.glob("vecho-system-audio-*"):
         if stale != binary:
             stale.unlink(missing_ok=True)
-    return binary
 
 
 def prepare(bin_dir: Path) -> SystemAudioSource:
