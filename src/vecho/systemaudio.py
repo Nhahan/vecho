@@ -45,8 +45,8 @@ SYSTEM_AUDIO_NAME = "System audio (all apps)"
 
 
 MAC_SILENCE_HINT = (
-    "allow your terminal under System Settings > Privacy & Security > "
-    "Screen & System Audio Recording, and check that something is playing"
+    "allow vecho (or the terminal you started it from) under System Settings > "
+    "Privacy & Security > Screen & System Audio Recording, and check that something is playing"
 )
 OTHER_SILENCE_HINT = "check that something is playing through the default sound output"
 
