@@ -51,6 +51,19 @@ else
     UV="${XDG_BIN_HOME:-$HOME/.local/bin}/uv"
 fi
 
+if [ "$os" = Linux ] && ! ldconfig -p 2>/dev/null | grep -q libportaudio; then
+    say "소리 장치용 부품을 설치합니다. 관리자 비밀번호를 물으면 입력해 주세요." \
+        "Installing the sound library. Enter your password if asked."
+    if command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get install -y libportaudio2 >/dev/null
+    elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y portaudio >/dev/null
+    elif command -v pacman >/dev/null 2>&1; then
+        sudo pacman -S --noconfirm portaudio >/dev/null
+    fi || say "PortAudio를 설치하지 못했습니다. 녹음하려면 직접 설치해 주세요." \
+        "Could not install PortAudio; install it yourself to record."
+fi
+
 step "2/4  vecho 설치" "2/4  Installing vecho"
 "$UV" tool install --force --python 3.12 "vecho$extra @ $SOURCE" ||
     fail "vecho를 설치하지 못했습니다. 인터넷 연결을 확인하고 다시 실행하세요." \
