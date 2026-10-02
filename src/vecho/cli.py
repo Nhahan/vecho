@@ -419,6 +419,24 @@ def cmd_app(args: argparse.Namespace, config: Config) -> int:
     return desktop.run(config, port=args.port, mode=mode)
 
 
+def cmd_setup(args: argparse.Namespace, config: Config) -> int:
+    from . import setup
+
+    return setup.run(config, open_app=not args.no_open)
+
+
+def cmd_shortcut(args: argparse.Namespace, config: Config) -> int:
+    from . import shortcut
+
+    print(f"Created {shortcut.install()}")
+    return 0
+
+
+def open_app() -> int:
+    """Entry point of the ``vecho-app`` launcher (no console window on Windows)."""
+    return main(["app"])
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vecho",
@@ -437,6 +455,12 @@ def build_parser() -> argparse.ArgumentParser:
     app.add_argument("--port", type=int, default=0, help="port on 127.0.0.1 (default: any free)")
     app.add_argument("--browser", action="store_true", help="use the web browser, not a window")
     app.add_argument("--no-open", action="store_true", help="only run the server")
+
+    setup_cmd = add(
+        "setup", cmd_setup, "get everything ready: AI models, system audio and a shortcut"
+    )
+    setup_cmd.add_argument("--no-open", action="store_true", help="do not open the app at the end")
+    add("shortcut", cmd_shortcut, "create the app shortcut (Applications / Start menu)")
 
     record = add("record", cmd_record, "record microphone + system audio until Ctrl+C")
     record.add_argument("-t", "--title", help="session title")
