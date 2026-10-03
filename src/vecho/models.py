@@ -25,8 +25,8 @@ from pathlib import Path
 # window whose memory it can also afford. Qwen models write Korean well at every size.
 LLM_TIERS = (
     (32, "qwen3.8:27b", 32768, 16000),  # ~18 GB
-    (16, "qwen3:8b", 16384, 8000),  # ~5 GB
-    (0, "qwen3:4b", 8192, 4000),  # ~2.5 GB
+    (16, "qwen3.5:9b", 16384, 8000),  # ~6.6 GB
+    (0, "qwen3.5:4b", 8192, 4000),  # ~3.4 GB
 )
 
 PullProgress = Callable[[str, int, int], None]  # (status, completed bytes, total bytes)

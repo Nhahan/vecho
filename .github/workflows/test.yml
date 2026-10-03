@@ -35,7 +35,7 @@ jobs:
       VECHO_SOURCE: ${{ github.workspace }}
       VECHO_NO_OPEN: "1"
       # small models keep the run short; the installer's own choices are tested above
-      VECHO_LLM_MODEL: qwen3:4b
+      VECHO_LLM_MODEL: qwen3.5:4b
       VECHO_WHISPER_MODEL: small
       VECHO_LLM_TIMEOUT: "900"
     steps:

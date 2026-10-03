@@ -18,9 +18,9 @@ from vecho.config import Config
         (128, "qwen3.8:27b"),
         (32, "qwen3.8:27b"),
         (31.8, "qwen3.8:27b"),
-        (16, "qwen3:8b"),
-        (8, "qwen3:4b"),
-        (0, "qwen3:4b"),
+        (16, "qwen3.5:9b"),
+        (8, "qwen3.5:4b"),
+        (0, "qwen3.5:4b"),
     ],
 )
 def test_the_summary_model_fits_the_computer(memory, model):
@@ -29,8 +29,8 @@ def test_the_summary_model_fits_the_computer(memory, model):
 
 def test_auto_picks_a_model_and_a_named_one_is_kept(monkeypatch):
     monkeypatch.setattr(models, "total_memory_gb", lambda: 16.0)
-    assert Config().llm_model == "qwen3:8b"
-    assert Config(llm_model="auto").llm_model == "qwen3:8b"
+    assert Config().llm_model == "qwen3.5:9b"
+    assert Config(llm_model="auto").llm_model == "qwen3.5:9b"
     assert Config(llm_model="llama3:8b").llm_model == "llama3:8b"
 
 
@@ -64,7 +64,7 @@ def test_a_model_download_reports_progress():
     seen = []
     try:
         models.pull_model(
-            f"http://127.0.0.1:{server.server_port}", "qwen3:4b", lambda *a: seen.append(a)
+            f"http://127.0.0.1:{server.server_port}", "qwen3.5:4b", lambda *a: seen.append(a)
         )
     finally:
         server.shutdown()
@@ -101,7 +101,7 @@ def test_the_linux_menu_entry_starts_the_app(tmp_path, monkeypatch):
 def test_the_context_fits_the_computer_unless_set(monkeypatch):
     monkeypatch.setattr(models, "total_memory_gb", lambda: 8.0)
     small = Config()
-    assert (small.llm_model, small.llm_num_ctx, small.chunk_chars) == ("qwen3:4b", 8192, 4000)
+    assert (small.llm_model, small.llm_num_ctx, small.chunk_chars) == ("qwen3.5:4b", 8192, 4000)
     chosen = Config(llm_model="qwen3.8:27b", llm_num_ctx=32768)
     assert (chosen.llm_num_ctx, chosen.chunk_chars) == (32768, 4000)
     assert Config(llm_num_ctx=6000).chunk_chars == 3000  # never more than half the context
