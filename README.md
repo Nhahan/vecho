@@ -4,6 +4,16 @@
 
 ![vecho](docs/summary.png)
 
+## 사양
+
+| | 최소 | 권장 |
+| --- | --- | --- |
+| macOS | macOS 13, 메모리 8GB, 저장 공간 7GB | Apple Silicon, macOS 14.4 이상, 메모리 16GB 이상 |
+| Windows | Windows 10, 메모리 8GB, 저장 공간 7GB | Windows 11, 메모리 16GB 이상 |
+
+- 상대방 목소리 녹음은 macOS 14.4 이상에서 됩니다.
+- 요약 모델은 메모리에 맞춰 설치됩니다: 32GB 이상 `qwen3.8:27b`(약 25GB 필요), 16GB 이상 `qwen3:8b`, 그 미만 `qwen3:4b`.
+
 ## 설치
 
 macOS
